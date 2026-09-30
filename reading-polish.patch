@@ -1,8 +1,8 @@
 diff --git a/apps/readest-app/public/locales/zh-CN/translation.json b/apps/readest-app/public/locales/zh-CN/translation.json
-index 59cd398..f8a8a9c 100644
+index 59cd398..450c22e 100644
 --- a/apps/readest-app/public/locales/zh-CN/translation.json
 +++ b/apps/readest-app/public/locales/zh-CN/translation.json
-@@ -2411,5 +2411,16 @@
+@@ -2411,5 +2411,22 @@
    "Sentence around the highlight": "高亮所在的句子",
    "Do not speak readings or Hanja glosses in parentheses after a word": "不朗读词语后括号内的读音或汉字注释",
    "Visible as {{name}}": "显示为 {{name}}",
@@ -18,7 +18,13 @@ index 59cd398..f8a8a9c 100644
 +  "This page may not reflow correctly. Please compare it with the original.": "本页可能无法准确重排，请对照原页阅读。",
 +  "No usable text on this page. View the original page; OCR is not included.": "本页没有可用文字，请查看原页。本版本不含 OCR。",
 +  "Could not return to this PDF page.": "无法跳转到对应原页，可关闭重排后手动定位。",
-+  "Original PDF Page": "PDF 原文件页码"
++  "Original PDF Page": "PDF 原文件页码",
++  "Reflow Settings": "重排设置",
++  "Close Reflow Settings": "收起设置",
++  "Show Reflow Controls": "显示阅读工具栏",
++  "Hide Reflow Controls": "隐藏阅读工具栏",
++  "Go": "跳转",
++  "Page Navigation": "翻页导航"
  }
 diff --git a/apps/readest-app/src/__tests__/components/Dialog.test.tsx b/apps/readest-app/src/__tests__/components/Dialog.test.tsx
 new file mode 100644
@@ -210,18 +216,35 @@ index f87ff3c..74afc29 100644
  describe('HeaderBar sidebar toggle', () => {
 diff --git a/apps/readest-app/src/__tests__/components/PdfReflowDialog.test.tsx b/apps/readest-app/src/__tests__/components/PdfReflowDialog.test.tsx
 new file mode 100644
-index 0000000..572086c
+index 0000000..92b20a1
 --- /dev/null
 +++ b/apps/readest-app/src/__tests__/components/PdfReflowDialog.test.tsx
-@@ -0,0 +1,133 @@
+@@ -0,0 +1,265 @@
 +import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 +import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 +import PdfReflowDialog from '@/app/reader/components/PdfReflowDialog';
-+import type { ReactNode } from 'react';
++import { eventDispatcher } from '@/utils/event';
++
++vi.mock('@/context/EnvContext', () => ({ useEnv: () => ({ appService: { isAndroidApp: true } }) }));
++vi.mock('@/store/themeStore', () => ({
++  useThemeStore: () => ({
++    safeAreaInsets: { top: 24, bottom: 16 },
++    statusBarHeight: 24,
++    systemUIVisible: true,
++  }),
++}));
++vi.mock('@/store/deviceStore', () => ({
++  useDeviceControlStore: () => ({
++    acquireBackKeyInterception: mocks.acquire,
++    releaseBackKeyInterception: mocks.release,
++  }),
++}));
 +
 +const mocks = vi.hoisted(() => ({
 +  pages: [] as Array<{ getReflowText?: () => Promise<unknown> }>,
 +  goTo: vi.fn(),
++  acquire: vi.fn(),
++  release: vi.fn(),
 +  index: 0,
 +}));
 +vi.mock('@/hooks/useTranslation', () => ({ useTranslation: () => (s: string) => s }));
@@ -247,14 +270,7 @@ index 0000000..572086c
 +    getProgress: () => null,
 +  }),
 +}));
-+vi.mock('@/components/Dialog', () => ({
-+  default: ({ children, onClose }: { children: ReactNode; onClose: () => void }) => (
-+    <div role='dialog'>
-+      <button onClick={onClose}>Close dialog</button>
-+      {children}
-+    </div>
-+  ),
-+}));
++
 +const textPage = (str: string) =>
 +  Promise.resolve({
 +    items: [{ str, transform: [14, 0, 0, 14, 60, 700], width: 300, height: 14 }],
@@ -263,6 +279,7 @@ index 0000000..572086c
 +    rotation: 0,
 +  });
 +beforeEach(() => {
++  sessionStorage.clear();
 +  mocks.index = 0;
 +  mocks.goTo.mockReset().mockImplementation(async (page: number) => {
 +    mocks.index = page;
@@ -280,6 +297,7 @@ index 0000000..572086c
 +    render(<PdfReflowDialog bookKey='pdf-1' onClose={vi.fn()} />);
 +    expect(await screen.findByText('第二页正文。')).toBeTruthy();
 +    expect(mocks.pages[0]!.getReflowText).not.toHaveBeenCalled();
++    fireEvent.click(screen.getByLabelText('Show Reflow Controls'));
 +    expect((screen.getByLabelText('Original PDF Page') as HTMLInputElement).value).toBe('2');
 +    expect(mocks.goTo).not.toHaveBeenCalled();
 +  });
@@ -288,10 +306,12 @@ index 0000000..572086c
 +    const close = vi.fn();
 +    const { container } = render(<PdfReflowDialog bookKey='pdf-1' onClose={close} />);
 +    await screen.findByText('第一页正文。');
++    fireEvent.click(screen.getByLabelText('Show Reflow Controls'));
++    fireEvent.click(screen.getByRole('button', { name: 'Reflow Settings' }));
 +    fireEvent.click(screen.getByLabelText('Increase Reflow Font Size'));
 +    expect(container.querySelector('article')!.style.fontSize).toBe('24px');
 +    expect(mocks.pages[0]!.getReflowText).toHaveBeenCalledTimes(1);
-+    fireEvent.click(screen.getByText('Next Page'));
++    fireEvent.click(screen.getAllByText('Next Page')[0]!);
 +    await screen.findByText('第二页正文。');
 +    fireEvent.click(screen.getByText('Back to Original Page'));
 +    await waitFor(() => expect(close).toHaveBeenCalledOnce());
@@ -319,7 +339,7 @@ index 0000000..572086c
 +        }),
 +    };
 +    render(<PdfReflowDialog bookKey='pdf-1' onClose={vi.fn()} />);
-+    fireEvent.click(screen.getByText('Next Page'));
++    fireEvent.click(screen.getAllByText('Next Page')[0]!);
 +    await screen.findByText('第二页正文。');
 +    await act(async () => {
 +      resolve(await textPage('不应出现的旧页。'));
@@ -335,16 +355,134 @@ index 0000000..572086c
 +    expect(container.querySelector('article img')).toBeNull();
 +  });
 +
-+  it('reports errors and permits closing when original navigation fails', async () => {
-+    mocks.goTo.mockRejectedValue(new Error('closed viewer'));
++  it('closes immediately even if original navigation never resolves', async () => {
++    mocks.goTo.mockImplementation(() => new Promise(() => {}));
 +    const close = vi.fn();
 +    render(<PdfReflowDialog bookKey='pdf-1' onClose={close} />);
 +    await screen.findByText('第一页正文。');
++    fireEvent.click(screen.getByLabelText('Show Reflow Controls'));
 +    fireEvent.click(screen.getByText('Back to Original Page'));
-+    await screen.findByText('Could not return to this PDF page.');
-+    expect(close).not.toHaveBeenCalled();
-+    fireEvent.click(screen.getByText('Close'));
 +    expect(close).toHaveBeenCalledOnce();
++  });
++
++  it('starts without settings and lets all reading controls hide again', async () => {
++    const { container } = render(<PdfReflowDialog bookKey='pdf-1' onClose={vi.fn()} />);
++    await screen.findByText('第一页正文。');
++    expect(container.querySelector('.pdf-reflow-controls')).toBeNull();
++    expect(container.querySelector('header')!.hasAttribute('inert')).toBe(true);
++    fireEvent.click(screen.getByText('第一页正文。'));
++    expect(container.querySelector('header')!.hasAttribute('inert')).toBe(false);
++    fireEvent.click(screen.getByRole('button', { name: 'Reflow Settings' }));
++    expect(container.querySelector('.pdf-reflow-controls')).not.toBeNull();
++    fireEvent.click(screen.getByText('Close Reflow Settings'));
++    expect(container.querySelector('.pdf-reflow-controls')).toBeNull();
++    fireEvent.click(screen.getByLabelText('Hide Reflow Controls'));
++    expect(container.querySelector('header')!.hasAttribute('inert')).toBe(true);
++  });
++
++  it('native Back closes settings first, then goes directly to library using current state', async () => {
++    const close = vi.fn();
++    const library = vi.fn();
++    render(<PdfReflowDialog bookKey='pdf-1' onClose={close} onGoToLibrary={library} />);
++    await screen.findByText('第一页正文。');
++    fireEvent.click(screen.getByLabelText('Show Reflow Controls'));
++    fireEvent.click(screen.getByRole('button', { name: 'Reflow Settings' }));
++    act(() => {
++      expect(eventDispatcher.dispatchSync('native-key-down', { keyName: 'Back' })).toBe(true);
++    });
++    expect(screen.queryByText('Close Reflow Settings')).toBeNull();
++    expect(close).not.toHaveBeenCalled();
++    act(() => {
++      eventDispatcher.dispatchSync('native-key-down', { keyName: 'Back' });
++    });
++    expect(close).toHaveBeenCalledOnce();
++    expect(library).toHaveBeenCalledOnce();
++    expect(mocks.goTo).not.toHaveBeenCalled();
++  });
++
++  it('Escape and repeated native Back exit to library only once, without waiting on PDF', async () => {
++    mocks.goTo.mockImplementation(() => new Promise(() => {}));
++    const close = vi.fn();
++    const library = vi.fn();
++    render(<PdfReflowDialog bookKey='pdf-1' onClose={close} onGoToLibrary={library} />);
++    await screen.findByText('第一页正文。');
++    fireEvent.keyDown(window, { key: 'Escape' });
++    act(() => {
++      eventDispatcher.dispatchSync('native-key-down', { keyName: 'Back' });
++    });
++    expect(close).toHaveBeenCalledOnce();
++    expect(library).toHaveBeenCalledOnce();
++    expect(mocks.goTo).not.toHaveBeenCalled();
++  });
++
++  it('does not toggle controls after scrolling or while text is selected', async () => {
++    const { container } = render(<PdfReflowDialog bookKey='pdf-1' onClose={vi.fn()} />);
++    const text = await screen.findByText('第一页正文。');
++    const article = container.querySelector('article')!;
++    fireEvent.pointerDown(article, { clientX: 100, clientY: 100 });
++    fireEvent.scroll(article);
++    fireEvent.click(text);
++    expect(container.querySelector('header')!.hasAttribute('inert')).toBe(true);
++    // jsdom selection serialization is incomplete; model a non-empty native
++    // selection while retaining real pointer/scroll handlers above.
++    const selection = vi.spyOn(window, 'getSelection').mockReturnValue({
++      toString: () => '第一页',
++    } as Selection);
++    fireEvent.click(text);
++    expect(container.querySelector('header')!.hasAttribute('inert')).toBe(true);
++    selection.mockRestore();
++  });
++
++  it('shows a navigation error toast without reopening or trapping the reader', async () => {
++    const toast = vi.fn();
++    eventDispatcher.on('toast', toast);
++    mocks.goTo.mockRejectedValue(new Error('render failed'));
++    const close = vi.fn();
++    render(<PdfReflowDialog bookKey='pdf-1' onClose={close} />);
++    await screen.findByText('第一页正文。');
++    fireEvent.click(screen.getByLabelText('Show Reflow Controls'));
++    fireEvent.click(screen.getByText('Back to Original Page'));
++    expect(close).toHaveBeenCalledOnce();
++    await waitFor(() => expect(toast).toHaveBeenCalledOnce());
++    eventDispatcher.off('toast', toast);
++  });
++
++  it('keeps the original document unchanged when returning to library after changing reflow page', async () => {
++    const library = vi.fn();
++    render(<PdfReflowDialog bookKey='pdf-1' onClose={vi.fn()} onGoToLibrary={library} />);
++    await screen.findByText('第一页正文。');
++    fireEvent.click(screen.getAllByText('Next Page')[0]!);
++    await screen.findByText('第二页正文。');
++    act(() => {
++      eventDispatcher.dispatchSync('native-key-down', { keyName: 'Back' });
++    });
++    expect(library).toHaveBeenCalledOnce();
++    expect(mocks.goTo).not.toHaveBeenCalled();
++  });
++
++  it('restores reflow page and font size within this app session after leaving', async () => {
++    const first = render(<PdfReflowDialog bookKey='pdf-1' onClose={vi.fn()} />);
++    await screen.findByText('第一页正文。');
++    fireEvent.click(screen.getAllByText('Next Page')[0]!);
++    await screen.findByText('第二页正文。');
++    fireEvent.click(screen.getByLabelText('Show Reflow Controls'));
++    fireEvent.click(screen.getByRole('button', { name: 'Reflow Settings' }));
++    fireEvent.click(screen.getByLabelText('Increase Reflow Font Size'));
++    first.unmount();
++    const second = render(<PdfReflowDialog bookKey='pdf-1' onClose={vi.fn()} />);
++    await screen.findByText('第二页正文。');
++    expect(second.container.querySelector('article')!.style.fontSize).toBe('24px');
++    expect(second.container.querySelector('header')!.hasAttribute('inert')).toBe(true);
++  });
++
++  it('cleans up native Back and Escape listeners on unmount', () => {
++    const close = vi.fn();
++    const { unmount } = render(<PdfReflowDialog bookKey='pdf-1' onClose={close} />);
++    unmount();
++    expect(eventDispatcher.dispatchSync('native-key-down', { keyName: 'Back' })).toBe(false);
++    fireEvent.keyDown(window, { key: 'Escape' });
++    expect(close).not.toHaveBeenCalled();
++    expect(mocks.release).toHaveBeenCalled();
 +  });
 +});
 diff --git a/apps/readest-app/src/__tests__/components/ReadingPanels.test.tsx b/apps/readest-app/src/__tests__/components/ReadingPanels.test.tsx
@@ -954,7 +1092,7 @@ index 9cedc20..716a88f 100644
                  'placeholder:text-base-content/50 truncate',
                  'focus:outline-hidden focus:ring-0',
 diff --git a/apps/readest-app/src/app/reader/components/HeaderBar.tsx b/apps/readest-app/src/app/reader/components/HeaderBar.tsx
-index 58f1135..712bb11 100644
+index 58f1135..32b49f7 100644
 --- a/apps/readest-app/src/app/reader/components/HeaderBar.tsx
 +++ b/apps/readest-app/src/app/reader/components/HeaderBar.tsx
 @@ -33,6 +33,8 @@ import NotebookToggler from './NotebookToggler';
@@ -989,7 +1127,7 @@ index 58f1135..712bb11 100644
            trafficLightInHeader ? 'pl-20' : isSideBarVisible ? 'ps-4' : 'ps-4 sm:ps-1.5',
            appService?.hasRoundedWindow && 'rounded-window-top-right',
            !isSideBarVisible && appService?.hasRoundedWindow && 'rounded-window-top-left',
-@@ -343,8 +349,18 @@ const HeaderBar: React.FC<HeaderBarProps> = ({
+@@ -343,8 +349,19 @@ const HeaderBar: React.FC<HeaderBarProps> = ({
              <ViewMenu
                bookKey={bookKey}
                onShowMetaHashDialog={() => setIsMetaHashDialogOpen(true)}
@@ -1002,6 +1140,7 @@ index 58f1135..712bb11 100644
 +                key={bookKey}
 +                bookKey={bookKey}
 +                onClose={() => setIsPdfReflowOpen(false)}
++                onGoToLibrary={onGoToLibrary}
 +              />
 +            </ModalPortal>
 +          )}
@@ -1010,54 +1149,60 @@ index 58f1135..712bb11 100644
                <SyncInfoDialog
 diff --git a/apps/readest-app/src/app/reader/components/PdfReflowDialog.tsx b/apps/readest-app/src/app/reader/components/PdfReflowDialog.tsx
 new file mode 100644
-index 0000000..b9eb6e8
+index 0000000..1ba1230
 --- /dev/null
 +++ b/apps/readest-app/src/app/reader/components/PdfReflowDialog.tsx
-@@ -0,0 +1,254 @@
+@@ -0,0 +1,331 @@
 +import { useEffect, useRef, useState } from 'react';
-+import Dialog from '@/components/Dialog';
++import { useThemeStore } from '@/store/themeStore';
++import { eventDispatcher } from '@/utils/event';
++import { useReflowNavigation } from '../hooks/useReflowNavigation';
 +import { useBookDataStore } from '@/store/bookDataStore';
 +import { useReaderStore } from '@/store/readerStore';
 +import { useTranslation } from '@/hooks/useTranslation';
 +import { reflowPdfText, type ReflowPage } from '@/utils/pdfReflow';
 +import '@/styles/pdf-reflow.css';
++import { readReflowSession, writeReflowSession } from '@/utils/pdfReflowSession';
 +
 +interface Props {
 +  bookKey: string;
 +  onClose: () => void;
++  onGoToLibrary?: () => void;
 +}
 +
 +/** Intentionally read-only, page-based reflow. Never creates synthetic CFIs or
 + * writes annotations/positions into the original document while reading text. */
-+const PdfReflowDialog = ({ bookKey, onClose }: Props) => {
++const PdfReflowDialog = ({ bookKey, onClose, onGoToLibrary }: Props) => {
 +  const _ = useTranslation();
++  const { safeAreaInsets, statusBarHeight, systemUIVisible } = useThemeStore();
++  const [chromeVisible, setChromeVisible] = useState(false);
++  const [settingsOpen, setSettingsOpen] = useState(false);
++  const rootRef = useRef<HTMLDivElement>(null);
++  const exiting = useRef(false);
++  const pointer = useRef<{ x: number; y: number; time: number; moved: boolean } | null>(null);
 +  const { getBookData } = useBookDataStore();
 +  const { getView, getProgress } = useReaderStore();
 +  const bookDoc = getBookData(bookKey)?.bookDoc;
 +  const count = bookDoc?.sections.length ?? 0;
++  const [saved] = useState(() => readReflowSession(bookKey, count));
 +  const [page, setPage] = useState(() => {
++    if (saved) return saved.page;
 +    const index =
 +      getView(bookKey)?.renderer.primaryIndex ?? getProgress(bookKey)?.section.current ?? 0;
 +    return Math.max(0, Math.min(count - 1, Number.isFinite(index) ? index : 0));
 +  });
 +  const [pageInput, setPageInput] = useState(String(page + 1));
-+  const [fontSize, setFontSize] = useState(22);
-+  const [lineHeight, setLineHeight] = useState(1.85);
++  const [fontSize, setFontSize] = useState(saved?.fontSize ?? 22);
++  const [lineHeight, setLineHeight] = useState(saved?.lineHeight ?? 1.85);
++  useEffect(() => {
++    writeReflowSession(bookKey, { page, fontSize, lineHeight });
++  }, [bookKey, page, fontSize, lineHeight]);
 +  const [result, setResult] = useState<ReflowPage | null>(null);
 +  const [busy, setBusy] = useState(true);
 +  const [error, setError] = useState(false);
-+  const [returnError, setReturnError] = useState(false);
-+  const [returning, setReturning] = useState(false);
++
 +  const scrollRef = useRef<HTMLElement>(null);
 +  const cacheRef = useRef(new Map<number, ReflowPage>());
-+  const mounted = useRef(true);
-+
-+  useEffect(() => {
-+    mounted.current = true;
-+    return () => {
-+      mounted.current = false;
-+    };
-+  }, []);
 +
 +  useEffect(() => {
 +    let current = true;
@@ -1065,7 +1210,6 @@ index 0000000..b9eb6e8
 +    setResult(null);
 +    setBusy(true);
 +    setError(false);
-+    setReturnError(false);
 +    if (scrollRef.current) scrollRef.current.scrollTop = 0;
 +    const load = async () => {
 +      try {
@@ -1099,27 +1243,36 @@ index 0000000..b9eb6e8
 +    };
 +  }, [bookDoc, page]);
 +
-+  const returnToOriginal = async () => {
-+    if (returning) return;
++  const leave = (library: boolean) => {
++    if (exiting.current) return;
++    exiting.current = true;
++    onClose();
++    if (library) onGoToLibrary?.();
++  };
++
++  useReflowNavigation(rootRef, () => {
++    if (settingsOpen) setSettingsOpen(false);
++    else leave(true);
++  });
++
++  const returnToOriginal = () => {
++    if (exiting.current) return;
 +    const view = getView(bookKey);
-+    if (!view || !count) {
-+      onClose();
-+      return;
-+    }
-+    setReturning(true);
-+    setReturnError(false);
-+    try {
-+      // PDF foliate sections are physical, zero-based page indices. Navigate
-+      // through the public viewer API so normal progress saving still applies.
-+      await view.goTo(page);
-+      // Foliate catches some navigation errors internally; confirm arrival
-+      // instead of closing and silently leaving the reader on the wrong page.
-+      if (view.renderer.primaryIndex !== page) throw new Error('PDF page navigation failed');
-+      if (mounted.current) onClose();
-+    } catch {
-+      if (mounted.current) setReturnError(true);
-+    } finally {
-+      if (mounted.current) setReturning(false);
++    // Closing never waits for PDF rendering. Even a stalled worker must not
++    // trap the user in reflow. Only this explicit action moves the original.
++    leave(false);
++    if (view && count) {
++      void Promise.resolve()
++        .then(async () => {
++          await view.goTo(page);
++          if (view.renderer.primaryIndex !== page) throw new Error('PDF navigation failed');
++        })
++        .catch(() =>
++          eventDispatcher.dispatch('toast', {
++            message: _('Could not return to this PDF page.'),
++            type: 'error',
++          }),
++        );
 +    }
 +  };
 +
@@ -1132,63 +1285,117 @@ index 0000000..b9eb6e8
 +  };
 +
 +  return (
-+    <Dialog
-+      isOpen
-+      fullScreen
-+      title={_('PDF Text Reflow')}
-+      onClose={() => {
-+        void returnToOriginal();
-+      }}
-+      boxClassName='pdf-reflow-dialog'
-+      contentClassName='pdf-reflow-body'
++    <div
++      ref={rootRef}
++      role='dialog'
++      aria-modal='true'
++      aria-label={_('PDF Text Reflow')}
++      tabIndex={-1}
++      className='pdf-reflow-reader'
++      style={
++        {
++          '--reflow-safe-top': `${Math.max(safeAreaInsets?.top ?? 0, systemUIVisible ? statusBarHeight : 0)}px`,
++          '--reflow-safe-bottom': `${safeAreaInsets?.bottom ?? 0}px`,
++        } as import('react').CSSProperties
++      }
 +    >
-+      <div className='pdf-reflow-controls'>
-+        <div className='pdf-reflow-control-row'>
-+          <button
-+            type='button'
-+            onClick={() => {
-+              void returnToOriginal();
-+            }}
-+            disabled={returning}
-+          >
-+            {_('Back to Original Page')}
-+          </button>
-+          <div className='pdf-reflow-font-controls'>
-+            <button
-+              type='button'
-+              aria-label={_('Decrease Reflow Font Size')}
-+              disabled={fontSize <= 16}
-+              onClick={() => setFontSize((n) => Math.max(16, n - 2))}
-+            >
-+              A−
++      <header
++        className='pdf-reflow-toolbar'
++        data-visible={chromeVisible}
++        aria-hidden={!chromeVisible}
++        inert={!chromeVisible}
++      >
++        <button type='button' onClick={() => leave(true)}>
++          {_('Go to Library')}
++        </button>
++        <button type='button' onClick={returnToOriginal}>
++          {_('Back to Original Page')}
++        </button>
++        <button
++          type='button'
++          aria-label={_('Reflow Settings')}
++          aria-expanded={settingsOpen}
++          onClick={() => setSettingsOpen((v) => !v)}
++        >
++          Aa
++        </button>
++        <button
++          type='button'
++          aria-label={_('Hide Reflow Controls')}
++          onClick={() => {
++            setSettingsOpen(false);
++            setChromeVisible(false);
++            rootRef.current?.focus();
++          }}
++        >
++          ×
++        </button>
++      </header>
++      {settingsOpen && (
++        <section className='pdf-reflow-controls' aria-label={_('Reflow Settings')}>
++          <div className='pdf-reflow-control-row'>
++            <button type='button' onClick={() => setSettingsOpen(false)}>
++              {_('Close Reflow Settings')}
 +            </button>
-+            <output aria-label={_('Font Size')}>{fontSize}</output>
-+            <button
-+              type='button'
-+              aria-label={_('Increase Reflow Font Size')}
-+              disabled={fontSize >= 36}
-+              onClick={() => setFontSize((n) => Math.min(36, n + 2))}
-+            >
-+              A＋
-+            </button>
++            <div className='pdf-reflow-font-controls'>
++              <button
++                type='button'
++                aria-label={_('Decrease Reflow Font Size')}
++                disabled={fontSize <= 16}
++                onClick={() => setFontSize((n) => Math.max(16, n - 2))}
++              >
++                A−
++              </button>
++              <output aria-label={_('Font Size')}>{fontSize}</output>
++              <button
++                type='button'
++                aria-label={_('Increase Reflow Font Size')}
++                disabled={fontSize >= 36}
++                onClick={() => setFontSize((n) => Math.min(36, n + 2))}
++              >
++                A＋
++              </button>
++            </div>
 +          </div>
-+        </div>
-+        <label className='pdf-reflow-spacing'>
-+          {_('Line Spacing')}
-+          <select value={lineHeight} onChange={(e) => setLineHeight(Number(e.target.value))}>
-+            <option value={1.5}>1.5</option>
-+            <option value={1.85}>1.85</option>
-+            <option value={2.2}>2.2</option>
-+          </select>
-+        </label>
-+        <p className='pdf-reflow-notice'>
-+          {_(
-+            'For single-column text PDFs. Images, tables and formulas are not reconstructed; check the original page when needed.',
-+          )}
-+        </p>
-+      </div>
++          <label className='pdf-reflow-spacing'>
++            {_('Line Spacing')}
++            <select value={lineHeight} onChange={(e) => setLineHeight(Number(e.target.value))}>
++              <option value={1.5}>1.5</option>
++              <option value={1.85}>1.85</option>
++              <option value={2.2}>2.2</option>
++            </select>
++          </label>
++          <p className='pdf-reflow-notice'>
++            {_(
++              'For single-column text PDFs. Images, tables and formulas are not reconstructed; check the original page when needed.',
++            )}
++          </p>
++        </section>
++      )}
 +      <article
 +        ref={scrollRef}
++        onPointerDown={(e) => {
++          pointer.current = { x: e.clientX, y: e.clientY, time: Date.now(), moved: false };
++        }}
++        onPointerMove={(e) => {
++          const p = pointer.current;
++          if (p && Math.hypot(e.clientX - p.x, e.clientY - p.y) > 8) p.moved = true;
++        }}
++        onPointerCancel={() => {
++          pointer.current = null;
++        }}
++        onScroll={() => {
++          if (pointer.current) pointer.current.moved = true;
++        }}
++        onClick={(e) => {
++          const p = pointer.current;
++          pointer.current = null;
++          if ((e.target as HTMLElement).closest('button, input, select, a')) return;
++          if (window.getSelection()?.toString()) return;
++          if (p && (p.moved || Date.now() - p.time > 450)) return;
++          setSettingsOpen(false);
++          setChromeVisible((v) => !v);
++        }}
 +        className='pdf-reflow-page'
 +        aria-busy={busy}
 +        style={{ fontSize: `${fontSize}px`, lineHeight }}
@@ -1220,23 +1427,38 @@ index 0000000..b9eb6e8
 +            )}
 +          </>
 +        )}
-+      </article>
-+      {returnError && (
-+        <div role='alert' className='pdf-reflow-warning'>
-+          {_('Could not return to this PDF page.')}
-+          <button type='button' onClick={onClose}>
-+            {_('Close')}
++        <nav className='pdf-reflow-end-navigation' aria-label={_('Page Navigation')}>
++          <button type='button' disabled={page <= 0} onClick={() => goPage(page - 1)}>
++            {_('Previous Page')}
 +          </button>
-+        </div>
-+      )}
++          <span>
++            {page + 1} / {count}
++          </span>
++          <button type='button' disabled={page >= count - 1} onClick={() => goPage(page + 1)}>
++            {_('Next Page')}
++          </button>
++        </nav>
++      </article>
++      <button
++        className='pdf-reflow-reveal'
++        type='button'
++        hidden={chromeVisible}
++        aria-label={_('Show Reflow Controls')}
++        onClick={() => setChromeVisible(true)}
++      >
++        {page + 1} / {count} · Aa
++      </button>
 +      <form
++        data-visible={chromeVisible}
++        aria-hidden={!chromeVisible}
++        inert={!chromeVisible}
 +        className='pdf-reflow-pagination'
 +        onSubmit={(e) => {
 +          e.preventDefault();
 +          goPage(Number(pageInput) - 1);
 +        }}
 +      >
-+        <button type='button' disabled={page <= 0 || returning} onClick={() => goPage(page - 1)}>
++        <button type='button' disabled={page <= 0} onClick={() => goPage(page - 1)}>
 +          {_('Previous Page')}
 +        </button>
 +        <label>
@@ -1252,18 +1474,12 @@ index 0000000..b9eb6e8
 +          />
 +          <span> / {count}</span>
 +        </label>
-+        <button type='submit' disabled={returning}>
-+          {_('Go')}
-+        </button>
-+        <button
-+          type='button'
-+          disabled={page >= count - 1 || returning}
-+          onClick={() => goPage(page + 1)}
-+        >
++        <button type='submit'>{_('Go')}</button>
++        <button type='button' disabled={page >= count - 1} onClick={() => goPage(page + 1)}>
 +          {_('Next Page')}
 +        </button>
 +      </form>
-+    </Dialog>
++    </div>
 +  );
 +};
 +
@@ -1437,6 +1653,83 @@ index 2f26925..eb9ff1f 100644
        style={{
          bottom: appService?.isAndroidApp
            ? `calc(env(safe-area-inset-bottom) + 64px)`
+diff --git a/apps/readest-app/src/app/reader/hooks/useReflowNavigation.ts b/apps/readest-app/src/app/reader/hooks/useReflowNavigation.ts
+new file mode 100644
+index 0000000..48a6796
+--- /dev/null
++++ b/apps/readest-app/src/app/reader/hooks/useReflowNavigation.ts
+@@ -0,0 +1,71 @@
++import { useEffect, useLayoutEffect, useRef, type RefObject } from 'react';
++import { useEnv } from '@/context/EnvContext';
++import { useDeviceControlStore } from '@/store/deviceStore';
++import { eventDispatcher } from '@/utils/event';
++
++/** This full-screen reader owns Back, independently of the underlying PDF's
++ * bars/menus. Latest refs avoid the old Dialog's stale onClose/page closure. */
++export function useReflowNavigation(root: RefObject<HTMLDivElement | null>, onBack: () => void) {
++  const { appService } = useEnv();
++  const { acquireBackKeyInterception, releaseBackKeyInterception } = useDeviceControlStore();
++  const latest = useRef(onBack);
++  useLayoutEffect(() => {
++    latest.current = onBack;
++  }, [onBack]);
++
++  useEffect(() => {
++    const previous = document.activeElement as HTMLElement | null;
++    root.current?.focus();
++    const nativeBack = (event: CustomEvent) => {
++      if (event.detail?.keyName !== 'Back') return false;
++      latest.current();
++      return true;
++    };
++    const keyboard = (event: KeyboardEvent) => {
++      if (event.key === 'Escape') {
++        event.preventDefault();
++        event.stopImmediatePropagation();
++        latest.current();
++      } else if (event.key === 'Tab' && root.current) {
++        const nodes = [
++          ...root.current.querySelectorAll<HTMLElement>(
++            'button:not(:disabled), input:not(:disabled), select:not(:disabled), [tabindex="0"]',
++          ),
++        ].filter((node) => !node.closest('[inert], [hidden], [aria-hidden="true"]'));
++        const first = nodes[0];
++        const last = nodes[nodes.length - 1];
++        if (!first) {
++          event.preventDefault();
++          root.current.focus();
++          return;
++        }
++        if (
++          event.shiftKey &&
++          (document.activeElement === first || document.activeElement === root.current)
++        ) {
++          event.preventDefault();
++          last?.focus();
++        } else if (
++          !event.shiftKey &&
++          (document.activeElement === last || document.activeElement === root.current)
++        ) {
++          event.preventDefault();
++          first.focus();
++        }
++      }
++    };
++    window.addEventListener('keydown', keyboard, true);
++    if (appService?.isAndroidApp) {
++      acquireBackKeyInterception();
++      eventDispatcher.onSync('native-key-down', nativeBack);
++    }
++    return () => {
++      window.removeEventListener('keydown', keyboard, true);
++      if (appService?.isAndroidApp) {
++        eventDispatcher.offSync('native-key-down', nativeBack);
++        releaseBackKeyInterception();
++      }
++      if (previous?.isConnected) previous.focus();
++    };
++  }, [root, appService?.isAndroidApp, acquireBackKeyInterception, releaseBackKeyInterception]);
++}
 diff --git a/apps/readest-app/src/components/Dialog.tsx b/apps/readest-app/src/components/Dialog.tsx
 index c6666dc..d9e8b57 100644
 --- a/apps/readest-app/src/components/Dialog.tsx
@@ -1829,23 +2122,33 @@ index 0000000..9961e02
 +}
 diff --git a/apps/readest-app/src/styles/pdf-reflow.css b/apps/readest-app/src/styles/pdf-reflow.css
 new file mode 100644
-index 0000000..c767abd
+index 0000000..5947133
 --- /dev/null
 +++ b/apps/readest-app/src/styles/pdf-reflow.css
-@@ -0,0 +1,115 @@
-+.pdf-reflow-dialog .pdf-reflow-body {
-+  display: flex;
-+  flex-direction: column;
-+  min-height: 0;
+@@ -0,0 +1,194 @@
++.pdf-reflow-reader {
++  position: absolute;
++  inset: 0;
 +  overflow: hidden;
-+  margin: 0;
-+  padding: 0;
 +  color: var(--color-base-content);
 +  background: var(--color-base-100);
++  outline: none;
++  pointer-events: auto;
++  --safe-top: max(var(--reflow-safe-top, 0px), env(safe-area-inset-top));
++  --safe-bottom: max(var(--reflow-safe-bottom, 0px), env(safe-area-inset-bottom));
 +}
 +.pdf-reflow-controls {
-+  padding: 8px 20px 10px;
-+  border-bottom: 1px solid var(--color-base-300);
++  position: absolute;
++  z-index: 3;
++  inset-inline: 12px;
++  bottom: calc(76px + var(--safe-bottom));
++  max-height: calc(100% - var(--safe-top) - var(--safe-bottom) - 144px);
++  overflow-y: auto;
++  padding: 16px 20px;
++  border: 1px solid var(--color-base-300);
++  border-radius: 18px;
++  background: var(--color-base-100);
++  box-shadow: 0 8px 30px rgb(0 0 0 / 0.12);
 +}
 +.pdf-reflow-control-row,
 +.pdf-reflow-font-controls,
@@ -1855,8 +2158,8 @@ index 0000000..c767abd
 +  justify-content: space-between;
 +  gap: 8px;
 +}
-+.pdf-reflow-dialog button,
-+.pdf-reflow-dialog select,
++.pdf-reflow-reader button,
++.pdf-reflow-reader select,
 +.pdf-reflow-pagination input {
 +  min-height: 44px;
 +  border: 1px solid var(--color-base-300);
@@ -1866,13 +2169,13 @@ index 0000000..c767abd
 +  background: var(--color-base-100);
 +  font-size: 14px;
 +}
-+.pdf-reflow-dialog button:disabled {
++.pdf-reflow-reader button:disabled {
 +  opacity: 0.4;
 +  cursor: default;
 +}
-+.pdf-reflow-dialog button:focus-visible,
-+.pdf-reflow-dialog input:focus-visible,
-+.pdf-reflow-dialog select:focus-visible {
++.pdf-reflow-reader button:focus-visible,
++.pdf-reflow-reader input:focus-visible,
++.pdf-reflow-reader select:focus-visible {
 +  outline: 2px solid var(--color-primary) !important;
 +  outline-offset: 2px;
 +}
@@ -1893,12 +2196,13 @@ index 0000000..c767abd
 +  opacity: 0.7;
 +}
 +.pdf-reflow-page {
-+  flex: 1;
-+  min-height: 0;
++  height: 100%;
 +  width: 100%;
 +  overflow-y: auto;
 +  overscroll-behavior: contain;
-+  padding: 24px max(24px, calc((100% - 700px) / 2));
++  touch-action: pan-y;
++  padding: calc(24px + var(--safe-top)) max(24px, calc((100% - 700px) / 2))
++    calc(68px + var(--safe-bottom));
 +  overflow-wrap: anywhere;
 +  user-select: text;
 +  -webkit-user-select: text;
@@ -1920,8 +2224,63 @@ index 0000000..c767abd
 +  padding: 12px;
 +  border: 1px solid var(--color-base-300);
 +}
++.pdf-reflow-toolbar,
 +.pdf-reflow-pagination {
-+  padding: 10px 14px max(12px, env(safe-area-inset-bottom));
++  position: absolute;
++  z-index: 2;
++  inset-inline: 0;
++  background: var(--color-base-100);
++  opacity: 0;
++  visibility: hidden;
++  pointer-events: none;
++  transition:
++    opacity 160ms ease-out,
++    transform 200ms ease-out,
++    visibility 0s linear 200ms;
++}
++.pdf-reflow-toolbar {
++  top: 0;
++  display: flex;
++  gap: 6px;
++  justify-content: space-between;
++  padding: calc(8px + var(--safe-top)) 12px 8px;
++  border-bottom: 1px solid var(--color-base-300);
++  transform: translateY(-8px);
++}
++.pdf-reflow-toolbar button {
++  border: 0;
++  padding-inline: 8px;
++}
++.pdf-reflow-toolbar[data-visible='true'],
++.pdf-reflow-pagination[data-visible='true'] {
++  opacity: 1;
++  visibility: visible;
++  pointer-events: auto;
++  transform: translateY(0);
++  transition-delay: 0s;
++}
++.pdf-reflow-reveal {
++  position: absolute;
++  z-index: 1;
++  bottom: calc(8px + var(--safe-bottom));
++  inset-inline-end: 16px;
++  opacity: 0.8;
++}
++.pdf-reflow-reveal[hidden] {
++  display: none;
++}
++.pdf-reflow-end-navigation {
++  display: flex;
++  gap: 12px;
++  justify-content: space-between;
++  align-items: center;
++  font-size: 13px;
++  margin-block: 24px;
++}
++.pdf-reflow-pagination {
++  bottom: 0;
++  transform: translateY(8px);
++  padding: 10px 14px calc(12px + var(--safe-bottom));
 +  border-top: 1px solid var(--color-base-300);
 +  flex-wrap: wrap;
 +  justify-content: center;
@@ -1943,7 +2302,20 @@ index 0000000..c767abd
 +    margin: 0;
 +  }
 +}
-+html[data-eink='true'] .pdf-reflow-dialog button:disabled {
++@media (prefers-reduced-motion: reduce) {
++  .pdf-reflow-toolbar,
++  .pdf-reflow-pagination {
++    transition: none;
++  }
++}
++html[data-eink='true'] .pdf-reflow-toolbar,
++html[data-eink='true'] .pdf-reflow-pagination {
++  transition: none;
++}
++html[data-eink='true'] .pdf-reflow-controls {
++  box-shadow: none;
++}
++html[data-eink='true'] .pdf-reflow-reader button:disabled {
 +  opacity: 1;
 +  color: var(--color-base-content);
 +  border-style: dashed;
@@ -2310,12 +2682,48 @@ index 0000000..d96f23e
 +  }
 +  return result;
 +}
+diff --git a/apps/readest-app/src/utils/pdfReflowSession.ts b/apps/readest-app/src/utils/pdfReflowSession.ts
+new file mode 100644
+index 0000000..1175226
+--- /dev/null
++++ b/apps/readest-app/src/utils/pdfReflowSession.ts
+@@ -0,0 +1,30 @@
++export interface ReflowSession {
++  page: number;
++  fontSize: number;
++  lineHeight: number;
++}
++// Match bookDataStore's stable book id, excluding per-view suffixes.
++const key = (bookKey: string) => `readest:pdf-reflow:${bookKey.split('-')[0]}`;
++export function readReflowSession(bookKey: string, count: number): ReflowSession | null {
++  try {
++    const value = JSON.parse(
++      sessionStorage.getItem(key(bookKey)) ?? 'null',
++    ) as ReflowSession | null;
++    if (!value || !Number.isInteger(value.page) || value.page < 0 || value.page >= count)
++      return null;
++    return {
++      page: value.page,
++      fontSize: Number.isFinite(value.fontSize) ? Math.max(16, Math.min(36, value.fontSize)) : 22,
++      lineHeight: [1.5, 1.85, 2.2].includes(value.lineHeight) ? value.lineHeight : 1.85,
++    };
++  } catch {
++    return null;
++  }
++}
++export function writeReflowSession(bookKey: string, state: ReflowSession): void {
++  try {
++    sessionStorage.setItem(key(bookKey), JSON.stringify(state));
++  } catch {
++    /* Reading still works if storage is unavailable. */
++  }
++}
 diff --git a/docs/pdf-reflow.md b/docs/pdf-reflow.md
 new file mode 100644
-index 0000000..b7b55d8
+index 0000000..c66099a
 --- /dev/null
 +++ b/docs/pdf-reflow.md
-@@ -0,0 +1,41 @@
+@@ -0,0 +1,47 @@
 +# PDF 文字重排（单栏文字版）
 +
 +## 入口与使用
@@ -2324,16 +2732,18 @@ index 0000000..b7b55d8
 +
 +- 当前原文件页码进入，竖向滚动读本页；上一页、下一页或输入原文件页码跳转。
 +- 字号 16–36px、三档行距；使用当前应用主题。
-+- 「返回对应原页」、关闭按钮或系统返回均尝试导航回当前重排页对应的原 PDF 页面。
++- 默认沉浸阅读，不显示大标题或常驻设置。轻点正文或右下页码按钮显示工具栏，×可隐藏；Aa打开字号/行距设置，设置可收起。滚动/长按选字不应触发工具栏。
++- Android系统返回或Escape：若设置展开先收起，否则直接返回书架，不依赖PDF跳页。工具栏另有返回书架按钮。
++- 「返回对应原页」是独立操作：立即退出重排，再请求原版跳页；失败仅toast提示，不允许跳页卡死阻止用户退出。
 +- 原文件页码含封面；示例书 PDF 第17页对应印刷第16页。
 +- 本轮不连续拼接跨页段落、不生成新书、不修改 PDF，不映射重排文字上的笔记，不接入听书；仍可在原版使用已有功能。
-+- 本轮字号、行距及缓存为打开面板期间有效；关闭后以原版进度为准，不承诺持久化重排滚动位置。
++- 同一App会话内记忆每本书重排页码、字号与行距（sessionStorage，不含正文）；再次打开重排恢复。缓存仍仅打开期间有效，不保存段内滚动偏移，不与原版阅读进度强行同步。
 +
 +## 范围
 +
 +适用：有正常文字层的单栏横排 PDF，正文和独立小字注释。
 +不支持：OCR、复杂双栏结构还原、公式/表格/图片重建、AI 纠错或改写。
-+顶部持续提示局限，空页和旋转页明确回退原版。页眉/页脚仅保守去除孤立边缘数字页码，不笼统删除重复文字。
++设置内说明适用局限，空页和旋转页明确回退原版。页眉/页脚仅保守去除孤立边缘数字页码，不笼统删除重复文字。
 +可能多栏的检测只是启发式，不能发现所有复杂布局。文字层缺字、编码问题或 PDF 绘制成图像的文字无法靠此功能补回。
 +
 +## 实现
@@ -2353,6 +2763,10 @@ index 0000000..b7b55d8
 +- 第1页无文字；另6页触发可能多栏警告（物理128/182/225/226/240/280页），其余页无该警告不代表全部已人工验收。
 +- 对物理16/17页抽查：斜体英文题名与正文位置恢复；印刷16页脚注保留为小字，页码单独去除。
 +- 不在公开仓库上传用户PDF、提取全文或截图。
++
++## 交互修复（继20003版用户反馈后）
++
++移除通用Dialog外壳与常驻设置。独立useReflowNavigation以最新回调处理原生Back/Escape，设置优先收起，否则直接书架；退出不再等待PDF渲染。新增14项界面测试，含返回/订阅清理/无响应PDF/设置收起/正文滚动选字/会话记忆；连同顶栏、弹层与段落算法共54项测试通过。真实WebView CSS夹具验证412px宽时工具栏开合前后正文高度915px、首段top48px保持不变，隐藏visibility正常且无横向溢出。夹具不是原生APK端到端验证。
 +
 +## 尚需真机验证
 +

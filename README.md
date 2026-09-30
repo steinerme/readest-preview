@@ -26,7 +26,7 @@ The workflow uses standard public GitHub-hosted runners, not paid larger runners
 
 ## PDF text reflow (new)
 
-Open a PDF → show reader toolbar → View Options → PDF Text Reflow. This is a local, page-based reading mode for upright single-column PDFs with text layers. It supports adjustable font size/line spacing, small notes, original physical page navigation, and return to the original view. It does not do OCR, reconstruct images/formulas/tables, create synthetic annotations, or convert the entire PDF into a new book. Font settings/cache currently last for the open panel only. Full details and test boundaries are in the patched `docs/pdf-reflow.md`.
+Open a PDF → show reader toolbar → View Options → PDF Text Reflow. This is a local, page-based reading mode for upright single-column PDFs with text layers. It supports adjustable font size/line spacing, small notes, original physical page navigation, and return to the original view. It does not do OCR, reconstruct images/formulas/tables, create synthetic annotations, or convert the entire PDF into a new book. Reflow opens in immersive reading mode: tap text or the corner page button to reveal controls; Aa opens dismissible settings. Android Back dismisses settings first, otherwise returns directly to the library without waiting for PDF rendering. The separate original-page action also closes immediately before requesting navigation. Page/font/spacing are remembered per book within the app session; text caches remain panel-local. Full details and test boundaries are in the patched `docs/pdf-reflow.md`.
 
 The user's sample PDFs and extracted text are never published here. The existing preview signing key is reused for in-place preview updates.
 
