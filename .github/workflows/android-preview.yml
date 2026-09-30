@@ -13,7 +13,9 @@ jobs:
     env:
       NEXT_TELEMETRY_DISABLED: '1'
       CARGO_BUILD_JOBS: '2'
-      NODE_OPTIONS: --max-old-space-size=4096
+      # Standard public ubuntu runner: allow the large Next/Webpack graph
+      # more than the previous 4 GiB heap without selecting a paid runner.
+      NODE_OPTIONS: --max-old-space-size=10240
     steps:
       - uses: actions/checkout@v4
       - name: Checkout exact upstream source
