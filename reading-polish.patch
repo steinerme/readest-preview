@@ -1,0 +1,1256 @@
+diff --git a/apps/readest-app/src/__tests__/components/Dialog.test.tsx b/apps/readest-app/src/__tests__/components/Dialog.test.tsx
+new file mode 100644
+index 0000000..180455a
+--- /dev/null
++++ b/apps/readest-app/src/__tests__/components/Dialog.test.tsx
+@@ -0,0 +1,137 @@
++import { act, cleanup, render } from '@testing-library/react';
++import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
++import Dialog from '@/components/Dialog';
++import { getDialogSwipeCloseDurationMs } from '@/utils/dialogMotion';
++
++const drag = vi.hoisted(() => ({
++  move: (_data: { clientY: number; deltaY: number }) => {},
++  end: (_data: { velocity: number; clientY: number; canceled: boolean }) => {},
++}));
++vi.mock('@/hooks/useDrag', () => ({
++  useDrag: (move: typeof drag.move, _key: unknown, end: typeof drag.end) => {
++    drag.move = move;
++    drag.end = end;
++    return { handleDragStart: vi.fn() };
++  },
++}));
++vi.mock('@/hooks/useTranslation', () => ({ useTranslation: () => (key: string) => key }));
++vi.mock('@/context/EnvContext', () => ({
++  useEnv: () => ({ appService: { hasSafeAreaInset: true } }),
++}));
++vi.mock('@/store/themeStore', () => ({
++  useThemeStore: () => ({
++    systemUIVisible: true,
++    statusBarHeight: 24,
++    safeAreaInsets: { top: 24 },
++  }),
++}));
++vi.mock('@/store/deviceStore', () => ({ useDeviceControlStore: () => ({}) }));
++vi.mock('@/hooks/useResponsiveSize', () => ({ useResponsiveSize: (n: number) => n }));
++vi.mock('@/utils/rtl', () => ({ getDirFromUILanguage: () => 'ltr' }));
++vi.mock('@tauri-apps/plugin-haptics', () => ({ impactFeedback: vi.fn() }));
++
++beforeEach(() => {
++  vi.useFakeTimers();
++  vi.stubGlobal('innerWidth', 390);
++  vi.stubGlobal('innerHeight', 844);
++  vi.stubGlobal(
++    'matchMedia',
++    vi.fn(() => ({ matches: false })),
++  );
++});
++afterEach(() => {
++  cleanup();
++  vi.useRealTimers();
++  vi.unstubAllGlobals();
++  delete document.documentElement.dataset['eink'];
++});
++
++const ui = (open: boolean, onClose = vi.fn(), snapHeight = 0.6) => (
++  <Dialog isOpen={open} title='Settings' onClose={onClose} snapHeight={snapHeight}>
++    {open && <p>Body content</p>}
++  </Dialog>
++);
++
++describe('Dialog motion lifecycle', () => {
++  it('restores snap height and cancels stale drag cleanup on rapid reopen', () => {
++    const onClose = vi.fn();
++    const { container, rerender } = render(ui(true, onClose));
++    const box = container.querySelector('.modal-box') as HTMLElement;
++    const overlay = container.querySelector('.overlay') as HTMLElement;
++    expect(box.style.height).toBe('60%');
++    act(() => drag.end({ velocity: 2, clientY: 700, canceled: false }));
++    expect(onClose).toHaveBeenCalledOnce();
++    expect(box.style.transform).toBe('translateY(100%)');
++    rerender(ui(false, onClose));
++    act(() => vi.advanceTimersByTime(70));
++    rerender(ui(true, onClose));
++    expect(box.style.height).toBe('60%');
++    expect(box.style.transform).toBe('');
++    expect(overlay.style.opacity).toBe('');
++    act(() => drag.move({ clientY: 120, deltaY: 120 }));
++    const currentTransform = box.style.transform;
++    act(() => vi.advanceTimersByTime(400));
++    expect(box.style.transform).toBe(currentTransform);
++  });
++
++  it('retains closing content until the close transition finishes', () => {
++    const { container, rerender } = render(ui(true));
++    rerender(ui(false));
++    expect(container.textContent).toContain('Body content');
++    act(() => vi.advanceTimersByTime(299));
++    expect(container.textContent).toContain('Body content');
++    act(() => vi.advanceTimersByTime(1));
++    expect(container.textContent).not.toContain('Body content');
++  });
++
++  it('cleans up timers on unmount without later mutating the detached box', () => {
++    const { container, unmount } = render(ui(true));
++    const box = container.querySelector('.modal-box') as HTMLElement;
++    act(() => drag.end({ velocity: 2, clientY: 700, canceled: false }));
++    unmount();
++    expect(vi.getTimerCount()).toBe(0);
++    const transform = box.style.transform;
++    act(() => vi.advanceTimersByTime(400));
++    expect(box.style.transform).toBe(transform);
++  });
++
++  it.each(['reduced', 'eink'])('skips programmatic close animation for %s', (mode) => {
++    if (mode === 'eink') document.documentElement.dataset['eink'] = 'true';
++    else
++      vi.stubGlobal(
++        'matchMedia',
++        vi.fn(() => ({ matches: true })),
++      );
++    const onClose = vi.fn();
++    const { container } = render(ui(true, onClose));
++    const box = container.querySelector('.modal-box') as HTMLElement;
++    act(() => drag.end({ velocity: 2, clientY: 700, canceled: false }));
++    expect(onClose).toHaveBeenCalledOnce();
++    expect(box.style.transition).toBe('');
++    expect(box.style.transform).toBe('');
++  });
++
++  it('keeps safe-area padding and full height across reopen', () => {
++    const { container, rerender } = render(ui(true, vi.fn(), 0));
++    const box = container.querySelector('.modal-box') as HTMLElement;
++    rerender(ui(false, vi.fn(), 0));
++    rerender(ui(true, vi.fn(), 0));
++    expect(box.style.paddingTop).toBe('24px');
++    expect(box.style.height).toBe('100%');
++  });
++});
++
++describe('swipe velocity bounds', () => {
++  it.each([
++    0,
++    -1,
++    NaN,
++    Infinity,
++    0.7,
++    2,
++    999,
++  ])('clamps velocity %s to a deliberate duration', (v) => {
++    expect(getDialogSwipeCloseDurationMs(v)).toBeGreaterThanOrEqual(140);
++    expect(getDialogSwipeCloseDurationMs(v)).toBeLessThanOrEqual(260);
++  });
++});
+diff --git a/apps/readest-app/src/__tests__/components/HeaderBar.test.tsx b/apps/readest-app/src/__tests__/components/HeaderBar.test.tsx
+index f87ff3c..74afc29 100644
+--- a/apps/readest-app/src/__tests__/components/HeaderBar.test.tsx
++++ b/apps/readest-app/src/__tests__/components/HeaderBar.test.tsx
+@@ -31,10 +31,11 @@ vi.mock('@/store/themeStore', () => ({
+ vi.mock('@/store/sidebarStore', () => ({
+   useSidebarStore: () => ({ isSideBarVisible: false, getIsSideBarVisible: () => false }),
+ }));
++let hoveredBookKey = 'book-1';
+ vi.mock('@/store/readerStore', () => ({
+   useReaderStore: () => ({
+     bookKeys: ['book-1'],
+-    hoveredBookKey: 'book-1',
++    hoveredBookKey,
+     getView: () => null,
+     getViewSettings: () => ({ enableAnnotationQuickActions: false }),
+     setHoveredBookKey: vi.fn(),
+@@ -105,6 +106,27 @@ afterEach(() => {
+   vi.unstubAllGlobals();
+   useEnvMock.mockReset();
+   currentBookData = null;
++  hoveredBookKey = 'book-1';
++});
++
++describe('HeaderBar reading motion', () => {
++  it('uses scoped compositor motion without animating safe-area margins', () => {
++    const { container } = renderHeader();
++    const bar = container.querySelector('.header-bar')!;
++    expect(bar.classList.contains('reading-chrome')).toBe(true);
++    expect(bar.className).not.toContain('transition-[opacity,margin-top]');
++    expect(bar.getAttribute('data-visible')).toBe('true');
++    expect(bar.hasAttribute('inert')).toBe(false);
++  });
++
++  it('keeps a hidden toolbar mounted but removes it from focus and accessibility', () => {
++    hoveredBookKey = '';
++    const { container } = renderHeader();
++    const bar = container.querySelector('.header-bar')!;
++    expect(bar.getAttribute('data-visible')).toBe('false');
++    expect(bar.getAttribute('aria-hidden')).toBe('true');
++    expect(bar.hasAttribute('inert')).toBe(true);
++  });
+ });
+ 
+ describe('HeaderBar sidebar toggle', () => {
+diff --git a/apps/readest-app/src/__tests__/components/ReadingPanels.test.tsx b/apps/readest-app/src/__tests__/components/ReadingPanels.test.tsx
+new file mode 100644
+index 0000000..512b45b
+--- /dev/null
++++ b/apps/readest-app/src/__tests__/components/ReadingPanels.test.tsx
+@@ -0,0 +1,86 @@
++import { cleanup, render } from '@testing-library/react';
++import { afterEach, describe, expect, it, vi } from 'vitest';
++import { NavigationPanel } from '@/app/reader/components/footerbar/NavigationPanel';
++import { FontLayoutPanel } from '@/app/reader/components/footerbar/FontLayoutPanel';
++import { ColorPanel } from '@/app/reader/components/footerbar/ColorPanel';
++
++vi.mock('@/hooks/useTranslation', () => ({ useTranslation: () => (key: string) => key }));
++vi.mock('@/context/EnvContext', () => ({
++  useEnv: () => ({ envConfig: {}, appService: { isMobile: true } }),
++}));
++vi.mock('@/store/readerStore', () => ({
++  useReaderStore: () => ({
++    getView: () => null,
++    getViewSettings: () => ({}),
++    setHoveredBookKey: vi.fn(),
++  }),
++}));
++vi.mock('@/store/settingsStore', () => ({
++  useSettingsStore: () => ({ settings: { screenBrightness: 50 } }),
++}));
++vi.mock('@/store/deviceStore', () => ({ useDeviceControlStore: () => ({}) }));
++vi.mock('@/store/themeStore', () => ({
++  useThemeStore: () => ({ themeMode: 'light', themeColor: 'gray', isDarkMode: false }),
++}));
++vi.mock('@/helpers/settings', () => ({ saveViewSettings: vi.fn(), saveSysSettings: vi.fn() }));
++vi.mock('@/components/Slider', () => ({ default: () => <input type='range' /> }));
++vi.mock('@/components/Button', () => ({
++  default: ({ label }: { label: string }) => <button type='button'>{label}</button>,
++}));
++vi.mock('@/app/reader/components/footerbar/PageJumpInput', () => ({ default: () => null }));
++
++afterEach(cleanup);
++
++const renderPanel = (kind: string, actionTab: string) => {
++  const common = { actionTab, bottomOffset: '64px', forceMobileLayout: true };
++  if (kind === 'font') return <FontLayoutPanel {...common} bookKey='book-1' marginIconSize={20} />;
++  if (kind === 'color') return <ColorPanel {...common} />;
++  return (
++    <NavigationPanel
++      {...common}
++      bookKey='book-1'
++      progressFraction={0.4}
++      progressValid={true}
++      sliderHeight={28}
++      navigationHandlers={{
++        onPrevPage: vi.fn(),
++        onNextPage: vi.fn(),
++        onPrevSection: vi.fn(),
++        onNextSection: vi.fn(),
++        onGoBack: vi.fn(),
++        onGoForward: vi.fn(),
++        onProgressChange: vi.fn(),
++      }}
++    />
++  );
++};
++
++describe.each(['font', 'color', 'progress'])('%s reading panel', (kind) => {
++  it('retains its mounted content and height classes while closing', () => {
++    const { container, rerender } = render(renderPanel(kind, kind));
++    const panel = container.querySelector('.reading-panel')!;
++    const firstControl = panel.querySelector('input,button');
++    expect(panel.getAttribute('data-state')).toBe('open');
++    expect(panel.hasAttribute('inert')).toBe(false);
++    rerender(renderPanel(kind, ''));
++    expect(container.querySelector('.reading-panel')).toBe(panel);
++    expect(panel.querySelector('input,button')).toBe(firstControl);
++    expect(panel.getAttribute('data-state')).toBe('closed');
++    expect(panel.getAttribute('aria-hidden')).toBe('true');
++    expect(panel.hasAttribute('inert')).toBe(true);
++    expect(panel.classList.contains('pb-4')).toBe(true);
++    expect(panel.classList.contains('pt-8')).toBe(true);
++    expect(panel.className).not.toMatch(/transition-all|invisible|translate-y-full/);
++  });
++
++  it('reverses a rapid close/reopen without unmounting or a timer', () => {
++    const { container, rerender } = render(renderPanel(kind, kind));
++    const panel = container.querySelector('.reading-panel')!;
++    rerender(renderPanel(kind, ''));
++    rerender(renderPanel(kind, kind));
++    expect(container.querySelector('.reading-panel')).toBe(panel);
++    expect(panel.getAttribute('data-state')).toBe('open');
++    expect(panel.hasAttribute('inert')).toBe(false);
++    expect(panel.getAttribute('aria-hidden')).toBe('false');
++  });
++});
+diff --git a/apps/readest-app/src/__tests__/styles/reading-polish.browser.test.ts b/apps/readest-app/src/__tests__/styles/reading-polish.browser.test.ts
+new file mode 100644
+index 0000000..d3099ab
+--- /dev/null
++++ b/apps/readest-app/src/__tests__/styles/reading-polish.browser.test.ts
+@@ -0,0 +1,74 @@
++import { afterEach, describe, expect, it } from 'vitest';
++import '@/styles/globals.css';
++import '@/styles/reader-polish.css';
++
++const mountPanel = () => {
++  const el = document.createElement('div');
++  el.className = 'reading-panel';
++  el.dataset['state'] = 'closed';
++  el.style.height = '240px';
++  document.body.appendChild(el);
++  return el;
++};
++
++// Seek real CSS transitions deterministically rather than sleeping and relying
++// on a background tab's throttled frame clock.
++const settle = (el: HTMLElement) => {
++  getComputedStyle(el).opacity;
++  el.getAnimations().forEach((animation) => animation.finish());
++  return getComputedStyle(el);
++};
++
++afterEach(() => {
++  document.querySelectorAll('.reading-panel').forEach((el) => el.remove());
++  delete document.documentElement.dataset['eink'];
++});
++
++describe('reading panel compositor motion', () => {
++  it('finishes open and closed without changing the measurable panel height', () => {
++    const el = mountPanel();
++    expect(settle(el).visibility).toBe('hidden');
++    const height = el.offsetHeight;
++    el.dataset['state'] = 'open';
++    expect(settle(el).opacity).toBe('1');
++    expect(getComputedStyle(el).visibility).toBe('visible');
++    el.dataset['state'] = 'closed';
++    expect(settle(el).opacity).toBe('0');
++    expect(getComputedStyle(el).visibility).toBe('hidden');
++    expect(el.offsetHeight).toBe(height);
++  });
++
++  it('keeps painting during exit and reverses a half-finished transition', () => {
++    const el = mountPanel();
++    settle(el);
++    el.dataset['state'] = 'open';
++    settle(el);
++    el.dataset['state'] = 'closed';
++    getComputedStyle(el).opacity;
++    const transitions = el.getAnimations();
++    expect(transitions.length).toBeGreaterThan(0);
++    transitions.forEach((animation) => {
++      animation.pause();
++      animation.currentTime = 90;
++    });
++    const halfway = getComputedStyle(el);
++    expect(halfway.visibility).toBe('visible');
++    expect(Number(halfway.opacity)).toBeGreaterThan(0);
++    expect(Number(halfway.opacity)).toBeLessThan(1);
++    el.dataset['state'] = 'open';
++    expect(settle(el).opacity).toBe('1');
++    expect(getComputedStyle(el).visibility).toBe('visible');
++  });
++
++  it('disables interpolation on e-ink while preserving open/closed state', () => {
++    document.documentElement.dataset['eink'] = 'true';
++    const el = mountPanel();
++    expect(settle(el).transitionProperty).toBe('none');
++    el.dataset['state'] = 'open';
++    expect(settle(el).opacity).toBe('1');
++    expect(getComputedStyle(el).transform).toBe('none');
++    expect(el.getAnimations()).toHaveLength(0);
++    el.dataset['state'] = 'closed';
++    expect(settle(el).visibility).toBe('hidden');
++  });
++});
+diff --git a/apps/readest-app/src/app/library/components/BookItem.tsx b/apps/readest-app/src/app/library/components/BookItem.tsx
+index d51d285..16d4d45 100644
+--- a/apps/readest-app/src/app/library/components/BookItem.tsx
++++ b/apps/readest-app/src/app/library/components/BookItem.tsx
+@@ -128,9 +128,9 @@ const BookItem: React.FC<BookItemProps> = ({
+     >
+       <div
+         className={clsx(
+-          'bookitem-main relative flex justify-center overflow-hidden rounded-sm',
++          'bookitem-main relative flex justify-center overflow-hidden',
++          showSpine ? 'library-book-cover-spined' : 'rounded-sm',
+           !fitCoverInGrid && 'aspect-28/41',
+-          coverFit === 'crop' && 'shadow-md',
+           mode === 'grid' && 'items-end',
+           mode === 'list' && 'min-w-20 items-center',
+         )}
+@@ -141,7 +141,7 @@ const BookItem: React.FC<BookItemProps> = ({
+           book={book}
+           coverFit={coverFit}
+           showSpine={showSpine}
+-          imageClassName={clsx('shadow-md', showSpine ? 'rounded-none' : 'rounded-sm')}
++          imageClassName={clsx(showSpine ? 'rounded-none' : 'rounded-sm')}
+           onAspectRatioChange={setCoverAspect}
+         />
+         {isTransferring && (
+@@ -165,9 +165,13 @@ const BookItem: React.FC<BookItemProps> = ({
+             )}
+           </div>
+         )}
+-        {bookSelected && (
+-          <div className='absolute inset-0 bg-black opacity-30 transition-opacity duration-300'></div>
+-        )}
++        <div
++          aria-hidden='true'
++          className={clsx(
++            'library-book-selection-scrim absolute inset-0 bg-black',
++            bookSelected ? 'opacity-30' : 'opacity-0',
++          )}
++        />
+         {isSelectMode && (
+           <div className='absolute bottom-1 right-1'>
+             {bookSelected ? (
+@@ -181,15 +185,15 @@ const BookItem: React.FC<BookItemProps> = ({
+       <div
+         className={clsx(
+           'flex w-full flex-col p-0',
+-          mode === 'grid' && 'pt-2',
++          mode === 'grid' && 'pt-2.5',
+           mode === 'list' && 'gap-1 py-0',
+         )}
+       >
+         <div className={clsx('min-w-0 flex-1', mode === 'list' && 'flex flex-col gap-1')}>
+           <h4
+             className={clsx(
+-              'overflow-hidden text-ellipsis font-semibold',
+-              mode === 'grid' && 'block whitespace-nowrap text-xs',
++              'library-book-title overflow-hidden text-ellipsis font-semibold',
++              mode === 'grid' && 'line-clamp-2 text-[13px] leading-[1.35] tracking-[0.01em]',
+               mode === 'list' && 'line-clamp-1 text-base',
+             )}
+           >
+diff --git a/apps/readest-app/src/app/library/components/Bookshelf.tsx b/apps/readest-app/src/app/library/components/Bookshelf.tsx
+index 96e9731..f420ecd 100644
+--- a/apps/readest-app/src/app/library/components/Bookshelf.tsx
++++ b/apps/readest-app/src/app/library/components/Bookshelf.tsx
+@@ -931,7 +931,7 @@ const Bookshelf: React.FC<BookshelfProps> = ({
+       tabIndex={-1}
+       role='main'
+       aria-label={_('Bookshelf')}
+-      className='bookshelf flex min-h-0 grow flex-col focus:outline-hidden'
++      className='bookshelf library-polish flex min-h-0 grow flex-col focus:outline-hidden'
+     >
+       {!contentSearch?.query.trim() && queryTerm && (
+         <div className='flex shrink-0 justify-center px-4 pb-2'>
+@@ -943,6 +943,7 @@ const Bookshelf: React.FC<BookshelfProps> = ({
+               'text-base-content/80 hover:text-base-content not-eink:transition-colors',
+               'flex h-9 items-center gap-2 rounded-lg border px-4 text-sm font-medium duration-150',
+               'focus-visible:ring-base-content/15 focus-visible:outline-hidden focus-visible:ring-2',
++              'library-polish-control',
+             )}
+           >
+             <MdManageSearch aria-hidden='true' className='h-5 w-5' />
+diff --git a/apps/readest-app/src/app/library/components/LibraryEmptyState.tsx b/apps/readest-app/src/app/library/components/LibraryEmptyState.tsx
+index c1e95f3..6b0f532 100644
+--- a/apps/readest-app/src/app/library/components/LibraryEmptyState.tsx
++++ b/apps/readest-app/src/app/library/components/LibraryEmptyState.tsx
+@@ -21,13 +21,13 @@ const LibraryEmptyState: React.FC<LibraryEmptyStateProps> = ({ onImport }) => {
+   const isMobile = appService?.isMobile ?? false;
+ 
+   return (
+-    <div className='hero-content text-neutral-content text-center'>
++    <div className='library-polish-empty hero-content text-neutral-content text-center'>
+       <div className='flex max-w-md flex-col items-center'>
+-        <PiBooks aria-hidden className='text-base-content/60 mb-10 size-16' />
+-        <h1 className='mb-5 text-balance text-4xl font-semibold leading-tight tracking-tight'>
++        <PiBooks aria-hidden className='text-base-content/60 mb-6 size-14' />
++        <h1 className='mb-3 text-balance text-2xl font-semibold leading-tight tracking-tight sm:text-3xl'>
+           {_('Start your library')}
+         </h1>
+-        <p className='text-base-content/70 mb-12 text-pretty text-base leading-relaxed'>
++        <p className='text-base-content/70 mb-8 max-w-sm text-pretty text-sm leading-relaxed sm:text-base'>
+           {isMobile
+             ? _('Pick a book from your device to add it to your library.')
+             : _('Drop a book anywhere on this window, or pick one from your computer.')}
+diff --git a/apps/readest-app/src/app/library/components/LibraryHeader.tsx b/apps/readest-app/src/app/library/components/LibraryHeader.tsx
+index 9cedc20..716a88f 100644
+--- a/apps/readest-app/src/app/library/components/LibraryHeader.tsx
++++ b/apps/readest-app/src/app/library/components/LibraryHeader.tsx
+@@ -8,6 +8,7 @@ import { PiDotsThreeCircle } from 'react-icons/pi';
+ import { MdOutlineMenu } from 'react-icons/md';
+ import { IoMdCloseCircle } from 'react-icons/io';
+ 
++import '@/styles/library-polish.css';
+ import { useEnv } from '@/context/EnvContext';
+ import { useThemeStore } from '@/store/themeStore';
+ import { useTranslation } from '@/hooks/useTranslation';
+@@ -93,7 +94,7 @@ const LibraryHeader: React.FC<LibraryHeaderProps> = ({
+     <div
+       ref={headerRef}
+       className={clsx(
+-        'titlebar z-10 flex h-[52px] w-full items-center py-2 pr-4 sm:h-[44px]',
++        'library-polish-header titlebar z-10 flex h-[52px] w-full items-center py-2 pr-4 sm:h-[44px]',
+         windowButtonVisible ? 'sm:pr-4' : 'sm:pr-6',
+         isTrafficLightVisible ? 'pl-16' : 'pl-0 sm:pl-2',
+       )}
+@@ -105,7 +106,7 @@ const LibraryHeader: React.FC<LibraryHeaderProps> = ({
+     >
+       <div className='flex w-full items-center justify-between space-x-6 sm:space-x-12'>
+         <div className='exclude-title-bar-mousedown relative flex w-full items-center ps-4'>
+-          <div className='relative flex h-9 w-full items-center sm:h-7'>
++          <div className='library-polish-search-shell relative flex h-9 w-full items-center sm:h-7'>
+             {/* The icon doubles as the mode indicator and toggle: magnifier
+                 for book search, full-text glyph for content search. */}
+             <div className='absolute inset-y-0 start-0 z-10 flex items-center'>
+@@ -116,8 +117,8 @@ const LibraryHeader: React.FC<LibraryHeaderProps> = ({
+                 title={searchTarget === 'text' ? _('Full Text Search') : _('Search Books')}
+                 className={clsx(
+                   'text-base-content/55 hover:text-base-content',
+-                  'not-eink:transition-colors ms-1.5 flex h-7 min-h-7 items-center justify-center',
+-                  'touch-target w-8 rounded-full bg-transparent duration-150',
++                  'library-polish-control not-eink:transition-colors ms-1.5 flex h-7 min-h-7 items-center justify-center',
++                  'touch-target w-8 rounded-full bg-transparent',
+                   'focus-visible:ring-base-content/15 focus-visible:outline-hidden focus-visible:ring-2',
+                 )}
+                 onClick={() => onSearchTargetChange(searchTarget === 'text' ? 'books' : 'text')}
+@@ -144,8 +145,8 @@ const LibraryHeader: React.FC<LibraryHeaderProps> = ({
+               onChange={handleSearchChange}
+               spellCheck='false'
+               className={clsx(
+-                'search-input input h-9 w-full rounded-full pe-[30%] ps-10 sm:h-7',
+-                'bg-base-300/45 border-0',
++                'library-polish-search search-input input h-9 w-full rounded-full pe-[30%] ps-10 sm:h-7',
++                'border-0',
+                 'font-sans text-sm font-light',
+                 'placeholder:text-base-content/50 truncate',
+                 'focus:outline-hidden focus:ring-0',
+diff --git a/apps/readest-app/src/app/reader/components/HeaderBar.tsx b/apps/readest-app/src/app/reader/components/HeaderBar.tsx
+index 58f1135..4dc1d5e 100644
+--- a/apps/readest-app/src/app/reader/components/HeaderBar.tsx
++++ b/apps/readest-app/src/app/reader/components/HeaderBar.tsx
+@@ -33,6 +33,7 @@ import NotebookToggler from './NotebookToggler';
+ import TranslationToggler from './TranslationToggler';
+ import ViewMenu from './ViewMenu';
+ import SyncInfoDialog from './SyncInfoDialog';
++import '@/styles/reader-polish.css';
+ 
+ interface HeaderBarProps {
+   bookKey: string;
+@@ -221,9 +222,12 @@ const HeaderBar: React.FC<HeaderBarProps> = ({
+         ref={headerRef}
+         role='banner'
+         aria-label={_('Header Bar')}
++        aria-hidden={!isHeaderVisible}
++        inert={!isHeaderVisible}
++        data-visible={isHeaderVisible}
+         className={clsx(
+-          `header-bar bg-base-100 absolute top-0 z-10 flex h-11 w-full items-center pr-4`,
+-          `shadow-xs transition-[opacity,margin-top] duration-300`,
++          `header-bar reading-chrome bg-base-100 absolute top-0 z-10 flex h-11 w-full items-center pr-4`,
++          'shadow-xs',
+           trafficLightInHeader ? 'pl-20' : isSideBarVisible ? 'ps-4' : 'ps-4 sm:ps-1.5',
+           appService?.hasRoundedWindow && 'rounded-window-top-right',
+           !isSideBarVisible && appService?.hasRoundedWindow && 'rounded-window-top-left',
+diff --git a/apps/readest-app/src/app/reader/components/footerbar/ColorPanel.tsx b/apps/readest-app/src/app/reader/components/footerbar/ColorPanel.tsx
+index b7957d4..1a122fe 100644
+--- a/apps/readest-app/src/app/reader/components/footerbar/ColorPanel.tsx
++++ b/apps/readest-app/src/app/reader/components/footerbar/ColorPanel.tsx
+@@ -79,21 +79,22 @@ export const ColorPanel: React.FC<ColorPanelProps> = ({
+   };
+ 
+   const classes = clsx(
+-    'footerbar-color-mobile not-eink:bg-base-200 eink:bg-base-100 absolute flex w-full flex-col items-center gap-y-8 px-4 transition-all',
++    'footerbar-color-mobile reading-panel not-eink:bg-base-200 eink:bg-base-100 absolute flex w-full flex-col items-center gap-y-8 px-4',
+     'eink:border-base-content eink:border-t',
+     !forceMobileLayout && 'sm:hidden',
+     // Paddings stay constant in both states (the slide is transform-only) so
+     // offsetHeight always reports the panel's settled height; the TTS mini
+     // player measures it to stack above the expanded panel.
+     'pb-4 pt-8',
+-    actionTab === 'color'
+-      ? 'pointer-events-auto translate-y-0 ease-out'
+-      : 'pointer-events-none invisible translate-y-full overflow-hidden ease-in',
++    actionTab === 'color' ? 'pointer-events-auto' : 'pointer-events-none overflow-hidden',
+   );
+ 
+   return (
+     <div
+       className={classes}
++      data-state={actionTab === 'color' ? 'open' : 'closed'}
++      aria-hidden={actionTab !== 'color'}
++      inert={actionTab !== 'color'}
+       style={{
+         bottom: appService?.isAndroidApp
+           ? `calc(env(safe-area-inset-bottom) + 64px)`
+@@ -142,7 +143,7 @@ export const ColorPanel: React.FC<ColorPanelProps> = ({
+               key={name}
+               onClick={() => setThemeColor(name)}
+               className={clsx(
+-                'flex shrink-0 flex-col items-center justify-center rounded-lg p-3 transition-all',
++                'reading-theme-swatch flex shrink-0 flex-col items-center justify-center rounded-lg p-3',
+                 'h-[40px] min-w-[80px]',
+                 themeColor === name
+                   ? 'ring-primary ring-offset-base-200 ring-2 ring-offset-2'
+@@ -159,7 +160,7 @@ export const ColorPanel: React.FC<ColorPanelProps> = ({
+           <button
+             onClick={() => cycleThemeMode()}
+             className={clsx(
+-              'flex shrink-0 flex-col items-center justify-center rounded-lg p-3 transition-all',
++              'reading-theme-swatch flex shrink-0 flex-col items-center justify-center rounded-lg p-3',
+               'h-[40px] min-w-[80px]',
+               themeMode === 'dark'
+                 ? 'ring-primary ring-offset-base-200 ring-2 ring-offset-2'
+diff --git a/apps/readest-app/src/app/reader/components/footerbar/FontLayoutPanel.tsx b/apps/readest-app/src/app/reader/components/footerbar/FontLayoutPanel.tsx
+index 2810216..f43a0dc 100644
+--- a/apps/readest-app/src/app/reader/components/footerbar/FontLayoutPanel.tsx
++++ b/apps/readest-app/src/app/reader/components/footerbar/FontLayoutPanel.tsx
+@@ -109,21 +109,22 @@ export const FontLayoutPanel: React.FC<FontLayoutPanelProps> = ({
+   }, []);
+ 
+   const classes = clsx(
+-    'footerbar-font-mobile not-eink:bg-base-200 eink:bg-base-100 absolute flex w-full flex-col items-center gap-y-8 px-4 transition-all',
++    'footerbar-font-mobile reading-panel not-eink:bg-base-200 eink:bg-base-100 absolute flex w-full flex-col items-center gap-y-8 px-4',
+     'eink:border-base-content eink:border-t',
+     !forceMobileLayout && 'sm:hidden',
+     // Paddings stay constant in both states (the slide is transform-only) so
+     // offsetHeight always reports the panel's settled height; the TTS mini
+     // player measures it to stack above the expanded panel.
+     'pb-4 pt-8',
+-    actionTab === 'font'
+-      ? 'pointer-events-auto translate-y-0 ease-out'
+-      : 'pointer-events-none invisible translate-y-full overflow-hidden ease-in',
++    actionTab === 'font' ? 'pointer-events-auto' : 'pointer-events-none overflow-hidden',
+   );
+ 
+   return (
+     <div
+       className={classes}
++      data-state={actionTab === 'font' ? 'open' : 'closed'}
++      aria-hidden={actionTab !== 'font'}
++      inert={actionTab !== 'font'}
+       style={{
+         bottom: appService?.isAndroidApp
+           ? `calc(env(safe-area-inset-bottom) + 64px)`
+diff --git a/apps/readest-app/src/app/reader/components/footerbar/FooterBar.tsx b/apps/readest-app/src/app/reader/components/footerbar/FooterBar.tsx
+index ebf7c36..4b4b6ac 100644
+--- a/apps/readest-app/src/app/reader/components/footerbar/FooterBar.tsx
++++ b/apps/readest-app/src/app/reader/components/footerbar/FooterBar.tsx
+@@ -219,7 +219,7 @@ const FooterBar: React.FC<FooterBarProps> = ({
+     'footer-bar shadow-xs bottom-0 left-0 z-10 flex w-full flex-col',
+     !forceMobileLayout && 'sm:h-[52px] sm:bg-base-100 sm:border-none',
+     'not-eink:border-base-300/50 eink:border-base-content border-t',
+-    'transition-[opacity,transform] duration-300',
++    'reading-chrome',
+     getFooterBarPosition(forceMobileLayout || window.innerWidth < 640, isSideBarPinned),
+     appService?.hasRoundedWindow && 'rounded-window-bottom-right',
+     !isSideBarVisible && appService?.hasRoundedWindow && 'rounded-window-bottom-left',
+@@ -255,6 +255,9 @@ const FooterBar: React.FC<FooterBarProps> = ({
+         ref={footerBarRef}
+         role='contentinfo'
+         aria-label={_('Footer Bar')}
++        aria-hidden={!isVisible}
++        inert={!isVisible}
++        data-visible={isVisible}
+         className={containerClasses}
+         dir={viewSettings?.rtl ? 'rtl' : 'ltr'}
+         onFocus={() => !appService?.isMobile && setHoveredBookKey(bookKey)}
+diff --git a/apps/readest-app/src/app/reader/components/footerbar/NavigationPanel.tsx b/apps/readest-app/src/app/reader/components/footerbar/NavigationPanel.tsx
+index 2f26925..eb9ff1f 100644
+--- a/apps/readest-app/src/app/reader/components/footerbar/NavigationPanel.tsx
++++ b/apps/readest-app/src/app/reader/components/footerbar/NavigationPanel.tsx
+@@ -59,21 +59,22 @@ export const NavigationPanel: React.FC<NavigationPanelProps> = ({
+   );
+ 
+   const classes = clsx(
+-    'footerbar-progress-mobile not-eink:bg-base-200 eink:bg-base-100 absolute flex w-full flex-col items-center gap-y-8 px-4 transition-all',
++    'footerbar-progress-mobile reading-panel not-eink:bg-base-200 eink:bg-base-100 absolute flex w-full flex-col items-center gap-y-8 px-4',
+     'eink:border-base-content eink:border-t',
+     !forceMobileLayout && 'sm:hidden',
+     // Paddings stay constant in both states (the slide is transform-only) so
+     // offsetHeight always reports the panel's settled height; the TTS mini
+     // player measures it to stack above the expanded panel.
+     'pb-4 pt-8',
+-    actionTab === 'progress'
+-      ? 'pointer-events-auto translate-y-0 ease-out'
+-      : 'pointer-events-none invisible translate-y-full overflow-hidden ease-in',
++    actionTab === 'progress' ? 'pointer-events-auto' : 'pointer-events-none overflow-hidden',
+   );
+ 
+   return (
+     <div
+       className={classes}
++      data-state={actionTab === 'progress' ? 'open' : 'closed'}
++      aria-hidden={actionTab !== 'progress'}
++      inert={actionTab !== 'progress'}
+       style={{
+         bottom: appService?.isAndroidApp
+           ? `calc(env(safe-area-inset-bottom) + 64px)`
+diff --git a/apps/readest-app/src/components/Dialog.tsx b/apps/readest-app/src/components/Dialog.tsx
+index c6666dc..d9e8b57 100644
+--- a/apps/readest-app/src/components/Dialog.tsx
++++ b/apps/readest-app/src/components/Dialog.tsx
+@@ -1,5 +1,5 @@
+ import clsx from 'clsx';
+-import React, { ReactNode, useEffect, useRef, useState } from 'react';
++import React, { ReactNode, useEffect, useLayoutEffect, useRef, useState } from 'react';
+ import { OverlayScrollbarsComponent } from 'overlayscrollbars-react';
+ import 'overlayscrollbars/overlayscrollbars.css';
+ import { MdArrowBackIosNew, MdArrowForwardIos } from 'react-icons/md';
+@@ -12,6 +12,8 @@ import { useResponsiveSize } from '@/hooks/useResponsiveSize';
+ import { impactFeedback } from '@tauri-apps/plugin-haptics';
+ import { getDirFromUILanguage } from '@/utils/rtl';
+ import { eventDispatcher } from '@/utils/event';
++import { getDialogSwipeCloseDurationMs, isDialogMotionReduced } from '@/utils/dialogMotion';
++import '@/styles/dialog-polish.css';
+ import { Overlay } from './Overlay';
+ 
+ const VELOCITY_THRESHOLD = 0.5;
+@@ -68,6 +70,16 @@ const hasScrollableAncestor = (target: HTMLElement, root: HTMLElement) => {
+ const isEditable = (target: HTMLElement) =>
+   !!target.closest('input, textarea, select, [contenteditable=""], [contenteditable="true"]');
+ 
++// These are the only properties mutated imperatively during a drag. React owns
++// safe-area padding and all other inline styles on the box.
++const clearDialogDragStyles = (modal: HTMLElement, overlay: HTMLElement) => {
++  modal.style.removeProperty('height');
++  modal.style.removeProperty('transform');
++  modal.style.removeProperty('transition');
++  overlay.style.removeProperty('opacity');
++  overlay.style.removeProperty('transition');
++};
++
+ const Dialog: React.FC<DialogProps> = ({
+   id,
+   isOpen,
+@@ -96,6 +108,7 @@ const Dialog: React.FC<DialogProps> = ({
+   // that edge, the body does not.
+   const dragOffsetRef = useRef(0);
+   const pendingSwipeRef = useRef<{ x: number; y: number } | null>(null);
++  const dragResetTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+   const previousActiveElementRef = useRef<HTMLElement | null>(null);
+   const iconSize22 = useResponsiveSize(22);
+   const isMobile = window.innerWidth < 640 || window.innerHeight < 640;
+@@ -122,6 +135,34 @@ const Dialog: React.FC<DialogProps> = ({
+     return () => clearTimeout(timer);
+   }, [isOpen]);
+ 
++  useLayoutEffect(() => {
++    if (isOpen) {
++      if (dragResetTimerRef.current !== null) {
++        clearTimeout(dragResetTimerRef.current);
++        dragResetTimerRef.current = null;
++      }
++      pendingSwipeRef.current = null;
++      const modal = dialogRef.current?.querySelector('.modal-box') as HTMLElement | null;
++      const overlay = dialogRef.current?.querySelector('.overlay') as HTMLElement | null;
++      if (modal && overlay) {
++        clearDialogDragStyles(modal, overlay);
++        // React will not rewrite an unchanged style prop after imperative drag
++        // mutations. Explicitly restore the resting height before first paint.
++        if (isMobile) modal.style.height = `${snapHeight ? snapHeight * 100 : 100}%`;
++      }
++    }
++  }, [isOpen, isMobile, snapHeight]);
++
++  useEffect(
++    () => () => {
++      if (dragResetTimerRef.current !== null) {
++        clearTimeout(dragResetTimerRef.current);
++        dragResetTimerRef.current = null;
++      }
++    },
++    [],
++  );
++
+   const handleKeyDown = (event: KeyboardEvent | CustomEvent) => {
+     // A nested confirmation owns dismissal until it closes.
+     if (dialogRef.current?.querySelector('dialog[open]')) return false;
+@@ -196,7 +237,11 @@ const Dialog: React.FC<DialogProps> = ({
+       overlay.style.opacity = `${1 - heightFraction}`;
+ 
+       setIsFullHeightInMobile(top < 44);
+-      modal.style.transition = `padding-top 0.3s ease-out`;
++      if (isDialogMotionReduced()) {
++        modal.style.removeProperty('transition');
++      } else {
++        modal.style.transition = `padding-top 0.3s ease-out`;
++      }
+     }
+   };
+ 
+@@ -217,19 +262,29 @@ const Dialog: React.FC<DialogProps> = ({
+         (data.velocity >= 0 && top >= window.innerHeight * snapLower))
+     ) {
+       // dialog is dismissed
+-      const transitionDuration = 0.15 / Math.max(data.velocity, 0.5);
+-      modal.style.height = '100%';
+-      modal.style.transition = `transform ${transitionDuration}s ease-out`;
+-      modal.style.transform = 'translateY(100%)';
+-      overlay.style.transition = `opacity ${transitionDuration}s ease-out`;
+-      overlay.style.opacity = '0';
++      if (dragResetTimerRef.current !== null) {
++        clearTimeout(dragResetTimerRef.current);
++        dragResetTimerRef.current = null;
++      }
++      const reduceMotion = isDialogMotionReduced();
++      if (reduceMotion) {
++        clearDialogDragStyles(modal, overlay);
++      } else {
++        const durationMs = getDialogSwipeCloseDurationMs(data.velocity);
++        modal.style.height = '100%';
++        modal.style.transition = `transform ${durationMs}ms ease-out`;
++        modal.style.transform = 'translateY(100%)';
++        overlay.style.transition = `opacity ${durationMs}ms ease-out`;
++        overlay.style.opacity = '0';
++        dragResetTimerRef.current = setTimeout(() => {
++          dragResetTimerRef.current = null;
++          if (!dialogRef.current?.open) clearDialogDragStyles(modal, overlay);
++        }, CLOSE_TRANSITION_MS);
++      }
+       onClose();
+       if (appService?.hasHaptics) {
+         impactFeedback('light');
+       }
+-      setTimeout(() => {
+-        modal.style.transform = 'translateY(0%)';
+-      }, 300);
+     } else if (
+       snapHeight &&
+       (data.canceled ||
+@@ -247,10 +302,8 @@ const Dialog: React.FC<DialogProps> = ({
+       modal.style.transform = `translateY(${currentTop - restingTop}px)`;
+       // Commit the equivalent position before animating back to rest.
+       modal.getBoundingClientRect();
+-      const reduceMotion =
+-        window.matchMedia('(prefers-reduced-motion: reduce)').matches ||
+-        document.documentElement.dataset['eink'] === 'true';
+-      const easing = '0.3s cubic-bezier(0.22, 1, 0.36, 1)';
++      const reduceMotion = isDialogMotionReduced();
++      const easing = '300ms cubic-bezier(0.22, 1, 0.36, 1)';
+       modal.style.transition = reduceMotion ? 'none' : `transform ${easing}`;
+       modal.style.transform = '';
+       overlay.style.transition = reduceMotion ? 'none' : `opacity ${easing}`;
+@@ -259,8 +312,10 @@ const Dialog: React.FC<DialogProps> = ({
+       // dialog is opened without snap
+       setIsFullHeightInMobile(true);
+       modal.style.height = '100%';
+-      modal.style.transition = `transform 0.3s ease-out`;
++      const reduceMotion = isDialogMotionReduced();
++      modal.style.transition = reduceMotion ? 'none' : `transform 300ms ease-out`;
+       modal.style.transform = `translateY(0%)`;
++      overlay.style.transition = reduceMotion ? 'none' : `opacity 300ms ease-out`;
+       overlay.style.opacity = '0';
+     }
+   };
+@@ -323,7 +378,7 @@ const Dialog: React.FC<DialogProps> = ({
+       aria-label={title}
+       aria-hidden={!isOpen}
+       className={clsx(
+-        'modal sm:min-w-90 z-50 h-full w-full items-start! bg-transparent! sm:w-full sm:items-center!',
++        'modal reading-dialog sm:min-w-90 z-50 h-full w-full items-start! bg-transparent! sm:w-full sm:items-center!',
+         className,
+       )}
+       dir={isRtl ? 'rtl' : undefined}
+diff --git a/apps/readest-app/src/styles/dialog-polish.css b/apps/readest-app/src/styles/dialog-polish.css
+new file mode 100644
+index 0000000..3af3154
+--- /dev/null
++++ b/apps/readest-app/src/styles/dialog-polish.css
+@@ -0,0 +1,65 @@
++/* Scoped to Dialog: do not alter dropdowns, popups, or other DaisyUI modals. */
++.reading-dialog {
++  transition:
++    visibility 0s linear 300ms,
++    opacity 220ms ease-out;
++}
++
++.reading-dialog[open] {
++  visibility: visible;
++  opacity: 1;
++  transition-delay: 0s;
++}
++
++.reading-dialog:not([open]) {
++  visibility: hidden;
++  opacity: 0;
++  pointer-events: none;
++}
++
++.reading-dialog > .modal-box {
++  opacity: 0;
++  translate: 0 0;
++  transition:
++    translate 280ms cubic-bezier(0.22, 1, 0.36, 1),
++    scale 280ms cubic-bezier(0.22, 1, 0.36, 1),
++    opacity 220ms ease-out;
++}
++
++.reading-dialog[open] > .modal-box {
++  opacity: 1;
++  translate: 0 0;
++  scale: 1;
++}
++
++@media (max-width: 639px), (max-height: 639px) {
++  .reading-dialog > .modal-box {
++    translate: 0 14px;
++    scale: 1;
++  }
++}
++
++@media (min-width: 640px) and (min-height: 640px) {
++  .reading-dialog > .modal-box {
++    translate: 0 0;
++    scale: 0.98;
++  }
++}
++
++.reading-dialog[open] > .modal-box {
++  translate: 0 0;
++  scale: 1;
++}
++
++/* Reset scoped transitions so hidden-state visibility remains DaisyUI-compatible. */
++@media (prefers-reduced-motion: reduce) {
++  .reading-dialog,
++  .reading-dialog > .modal-box {
++    transition: none;
++  }
++}
++
++:root[data-eink='true'] .reading-dialog,
++:root[data-eink='true'] .reading-dialog > .modal-box {
++  transition: none;
++}
+diff --git a/apps/readest-app/src/styles/library-polish.css b/apps/readest-app/src/styles/library-polish.css
+new file mode 100644
+index 0000000..9961e02
+--- /dev/null
++++ b/apps/readest-app/src/styles/library-polish.css
+@@ -0,0 +1,129 @@
++/* Scoped bookshelf polish: theme-aware, dimension-stable and low-motion. */
++.library-polish {
++  background-color: transparent;
++}
++
++.library-polish-header {
++  background-color: var(--color-base-100);
++  border-bottom: 1px solid color-mix(in oklab, var(--color-base-content) 8%, transparent);
++}
++
++.library-polish-header .library-polish-search-shell {
++  border-radius: 0.875rem;
++}
++
++.library-polish-header .library-polish-search {
++  border: 1px solid color-mix(in oklab, var(--color-base-content) 9%, transparent);
++  background-color: color-mix(in oklab, var(--color-base-200) 72%, var(--color-base-100));
++  color: var(--color-base-content);
++}
++
++.library-polish-header .library-polish-search::placeholder {
++  color: color-mix(in oklab, var(--color-base-content) 54%, transparent);
++}
++
++.library-polish-header .library-polish-search-shell:focus-within {
++  outline: 2px solid color-mix(in oklab, var(--color-base-content) 28%, transparent);
++  outline-offset: 2px;
++}
++
++.library-polish-header button.library-polish-control {
++  color: color-mix(in oklab, var(--color-base-content) 76%, transparent);
++}
++
++.library-polish-header button.library-polish-control:hover {
++  color: var(--color-base-content);
++  background-color: color-mix(in oklab, var(--color-base-content) 7%, transparent);
++}
++
++.library-polish-header button:focus-visible,
++.library-polish .bookshelf-import-item button:focus-visible {
++  outline: 2px solid color-mix(in oklab, var(--color-base-content) 42%, transparent);
++  outline-offset: 2px;
++}
++
++.library-polish .bookitem-main {
++  border: 1px solid color-mix(in oklab, var(--color-base-content) 10%, transparent);
++  background-color: var(--color-base-200);
++}
++
++.library-polish .bookitem-main:not(.library-book-cover-spined) {
++  border-radius: 0.5rem;
++}
++
++.library-polish .bookitem-main.library-book-cover-spined {
++  border-radius: 0;
++}
++
++.library-polish .book-item .library-book-title {
++  color: var(--color-base-content);
++}
++
++.library-polish .book-item p,
++.library-polish .book-item .text-neutral-content {
++  color: color-mix(in oklab, var(--color-base-content) 68%, transparent);
++}
++
++.library-polish .library-book-selection-scrim {
++  pointer-events: none;
++}
++
++.library-polish .bookshelf-import-item button {
++  border: 1px solid color-mix(in oklab, var(--color-base-content) 12%, transparent);
++  border-radius: 0.5rem;
++  background-color: color-mix(in oklab, var(--color-base-200) 52%, var(--color-base-100));
++}
++
++.library-polish-empty h1 {
++  color: var(--color-base-content);
++}
++
++.library-polish-empty p {
++  color: color-mix(in oklab, var(--color-base-content) 68%, transparent);
++}
++
++@media (prefers-reduced-motion: no-preference) {
++  html:not([data-eink='true']) .library-polish .book-item {
++    transition: transform 120ms ease-out;
++  }
++
++  html:not([data-eink='true']) .library-polish .book-item:active {
++    transform: scale(0.985);
++  }
++
++  html:not([data-eink='true']) .library-book-selection-scrim {
++    transition: opacity 140ms ease-out;
++  }
++
++  html:not([data-eink='true']) .library-polish-header button.library-polish-control {
++    transition:
++      color 140ms ease-out,
++      background-color 140ms ease-out;
++  }
++}
++
++@media (prefers-reduced-motion: reduce) {
++  .library-polish .book-item,
++  .library-book-selection-scrim,
++  .library-polish-header button.library-polish-control {
++    transition: none;
++  }
++}
++
++html[data-eink='true'] .library-polish .book-item,
++html[data-eink='true'] .library-book-selection-scrim,
++html[data-eink='true'] .library-polish-header button.library-polish-control {
++  transition: none;
++  transform: none;
++}
++
++html[data-eink='true'] .library-polish .library-book-selection-scrim {
++  opacity: 1;
++  background-color: transparent;
++}
++
++html[data-eink='true'] .library-polish .bookitem-main,
++html[data-eink='true'] .library-polish .bookshelf-import-item button {
++  border-color: var(--color-base-content);
++  background-color: var(--color-base-100);
++}
+diff --git a/apps/readest-app/src/styles/reader-polish.css b/apps/readest-app/src/styles/reader-polish.css
+new file mode 100644
+index 0000000..99f9587
+--- /dev/null
++++ b/apps/readest-app/src/styles/reader-polish.css
+@@ -0,0 +1,89 @@
++/* Scoped reader chrome: no animated layout, no blur over book text.
++   Panels remain mounted/measurable for the floating TTS player's geometry. */
++.reading-chrome {
++  --reading-enter: 260ms;
++  --reading-exit: 180ms;
++  --reading-ease: cubic-bezier(0.22, 1, 0.36, 1);
++  transition-property: opacity, transform, translate;
++  transition-duration: var(--reading-enter);
++  transition-timing-function: var(--reading-ease);
++}
++
++.reading-chrome[data-visible='false'] {
++  transition-duration: var(--reading-exit);
++}
++
++.header-bar.reading-chrome {
++  transform: translateY(0);
++}
++
++.header-bar.reading-chrome[data-visible='false'] {
++  transform: translateY(-8px);
++}
++
++.reading-panel {
++  --reading-enter: 260ms;
++  --reading-exit: 180ms;
++  --reading-ease: cubic-bezier(0.22, 1, 0.36, 1);
++  border-start-start-radius: 24px;
++  border-start-end-radius: 24px;
++  box-shadow: 0 -8px 28px rgb(0 0 0 / 0.06);
++  opacity: 0;
++  visibility: hidden;
++  transform: translateY(16px);
++  transition:
++    transform var(--reading-exit) var(--reading-ease),
++    opacity var(--reading-exit) ease-out,
++    visibility 0s linear var(--reading-exit);
++}
++
++.reading-panel[data-state='open'] {
++  opacity: 1;
++  visibility: visible;
++  transform: translateY(0);
++  transition-duration: var(--reading-enter), var(--reading-enter), 0s;
++  transition-delay: 0s;
++}
++
++.reading-chrome .btn:focus-visible,
++.reading-panel button:focus-visible {
++  outline: 2px solid var(--color-primary);
++  outline-offset: 3px;
++}
++
++.reading-theme-swatch {
++  transition:
++    opacity 140ms ease-out,
++    transform 140ms ease-out;
++}
++
++@media (prefers-reduced-motion: no-preference) {
++  html:not([data-eink='true']) .reading-theme-swatch:active {
++    transform: scale(0.96);
++  }
++}
++
++@media (prefers-reduced-motion: reduce) {
++  .reading-chrome,
++  .reading-panel,
++  .reading-theme-swatch {
++    transition: none !important;
++  }
++
++  .header-bar.reading-chrome[data-visible='false'],
++  .reading-panel {
++    transform: none;
++  }
++}
++
++html[data-eink='true'] .reading-chrome,
++html[data-eink='true'] .reading-panel,
++html[data-eink='true'] .reading-theme-swatch {
++  transition: none !important;
++  box-shadow: none;
++}
++
++html[data-eink='true'] .header-bar.reading-chrome[data-visible='false'],
++html[data-eink='true'] .reading-panel {
++  transform: none;
++}
+diff --git a/apps/readest-app/src/utils/dialogMotion.ts b/apps/readest-app/src/utils/dialogMotion.ts
+new file mode 100644
+index 0000000..9a305ab
+--- /dev/null
++++ b/apps/readest-app/src/utils/dialogMotion.ts
+@@ -0,0 +1,21 @@
++const REDUCED_MOTION_QUERY = '(prefers-reduced-motion: reduce)';
++const MIN_SWIPE_CLOSE_MS = 140;
++const MAX_SWIPE_CLOSE_MS = 260;
++
++/** Whether CSS and programmatic dialog transitions should be skipped. */
++export const isDialogMotionReduced = (): boolean => {
++  const prefersReducedMotion =
++    typeof window !== 'undefined' &&
++    typeof window.matchMedia === 'function' &&
++    window.matchMedia(REDUCED_MOTION_QUERY).matches;
++  const isEink =
++    typeof document !== 'undefined' && document.documentElement.dataset['eink'] === 'true';
++
++  return prefersReducedMotion || isEink;
++};
++
++/** Keep swipe-dismiss feedback deliberate even for noisy/near-zero velocities. */
++export const getDialogSwipeCloseDurationMs = (velocity: number): number => {
++  const safeVelocity = Number.isFinite(velocity) ? Math.max(velocity, 0.5) : 0.5;
++  return Math.round(Math.min(MAX_SWIPE_CLOSE_MS, Math.max(MIN_SWIPE_CLOSE_MS, 150 / safeVelocity)));
++};
+diff --git a/docs/reading-polish.md b/docs/reading-polish.md
+new file mode 100644
+index 0000000..0f03691
+--- /dev/null
++++ b/docs/reading-polish.md
+@@ -0,0 +1,79 @@
++# Reading UI polish — 第一阶段
++
++基线：`6e567ef`（Readest 0.12.10）
++
++分支：`ui/reading-polish`
++
++这是对真实应用组件的渐进改造，不是另建展示页面，也不代表已达到微信读书全部体验水准。
++
++## 已实施
++
++### 书架
++- 搜索栏采用主题色衍生的中性色、轻边框及明确的键盘焦点。
++- 网格书名为 13px、最多两行，封面与文字间距更舒展。
++- 收敛封面阴影，保留拟物书脊的直角选项。
++- 书籍按压为轻微缩放，选择遮罩常驻并以透明度切换，不再挂载后瞬现。
++- 空书架文案字号和留白重新平衡。
++- 不改排序、导入、同步、批量选择或虚拟列表实现。
++
++### 阅读器
++- 顶栏只做合成属性动效，不再插值安全区 margin-top。
++- 工具栏进入 260ms、退出 180ms；顶栏隐藏时上移 8px。
++- 字体、配色、进度面板使用 16px 位移与淡入淡出，关闭可见性延迟到退场结束，而不是立即 invisible。
++- 保持面板挂载和可测高度，兼容悬浮听书播放器的位置计算。
++- 隐藏工具栏、面板添加 inert 与 aria-hidden，防止不可见按钮参与键盘焦点。
++- 原有 safe-area、RTL、主题与桌面布局逻辑保留。
++
++### 通用设置弹层
++- 专属 `.reading-dialog` 样式，不覆盖其他模态组件。
++- 手机轻滑入，桌面轻缩放；关闭保留 300ms 内容窗口。
++- 拖拽关闭时长限制在 140–260ms，避免高速手势导致过短闪跳。
++- 修复旧拖拽清理定时器干扰快速重开的风险；卸载取消定时器。
++- 重开在首次绘制前恢复半屏高度与拖拽样式，保留安全区 padding。
++- JS 与 CSS 同时尊重减少动态效果和电纸书偏好。
++
++## 验证结果
++
++- 最终单次回归：9 个文件、108 项测试通过（包含新增弹层 13 项、阅读面板 6 项、顶栏新增 2 项）。
++- 另一次相关回归：搜索、选择模式、导航、批注导入导出等 6 个文件、36 项通过；它们运行在最终弹层收尾之前，不计入最终 108 项。
++- 全项目 TypeScript 检查通过，使用仓库根依赖 TypeScript 5.9.3：
++  `node node_modules/typescript/bin/tsc --noEmit -p apps/readest-app/tsconfig.json`
++- 18 个新增/修改源码与测试文件 `biome check` 通过；`git diff --check` 通过。
++- 真实 WebView 中，以编译后的项目 CSS 验证阅读面板与弹层：打开、关闭中间态、快速反向、关闭最终 hidden、电纸书零动画、面板高度不变。使用 Web Animations API 推进真实 CSS 动画时间，避免后台帧节流影响结果。
++- 新增 `reading-polish.browser.test.ts` 供正常 Playwright 环境执行。当前设备未安装 Playwright Chromium，未把这份测试计为自动化通过；上述 CSS 浏览器检查为独立夹具验证，不是完整应用端到端验收。
++
++## 尚未验证／环境限制
++
++- 已启动真实 Next.js Web 服务并获得 `/library` HTTP 200，浏览器曾实际渲染空书架。
++- 内置示例书下载报 File is empty；测试文件导入和随后热更新未完成可靠的有书书架／阅读器端到端验证。不能将空书架截图当作完整体验验收。
++- Android PRoot 下 Turbopack 报 Invalid symlink；原生 TypeScript 7 存在 pnpm 硬链接路径解析问题。Web 本地预览使用 webpack，并在 node_modules 的 OpenNext 适配器临时跳过 workerd 初始化；没有修改仓库 Next 配置或依赖锁文件。该临时环境修改不在交付补丁内，不能用来验证云端功能。
++- 尚未生成 APK、IPA、桌面安装包；未做原生设备帧率测量、真实手势回归或生产构建。
++- 本轮未实现书封到阅读页面的共享元素转场，也未改翻页引擎、同步逻辑和阅读主题内容样式。
++
++## 在常规开发机验证
++
++按项目 CONTRIBUTING.md 准备 Node/pnpm/Tauri 环境及子模块，执行：
++
++```sh
++pnpm install --frozen-lockfile
++pnpm --filter @readest/readest-app setup-vendors
++pnpm dev-web
++pnpm --filter @readest/readest-app test --run
++pnpm --filter @readest/readest-app test:browser -- src/__tests__/styles/reading-polish.browser.test.ts
++```
++
++手工验收：手机竖/横屏、桌面、深色、RTL、电纸书、减少动态效果；长书名、多书滚动、选择模式；打开书籍、调字号、切换面板、关闭与快速重开；半屏设置弹层拖拽取消和关闭；听书悬浮条位置；返回书架滚动恢复。
++
++## 回退／应用补丁
++
++补丁基于上述确切提交，应用前确保工作区干净：
++
++```sh
++git apply --check readest-reading-polish.patch
++git apply readest-reading-polish.patch
++# 回退（没有后续冲突修改时）
++git apply -R --check readest-reading-polish.patch
++git apply -R readest-reading-polish.patch
++```
++
++保留 Readest 原有 AGPL-3.0 许可及署名。

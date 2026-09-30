@@ -1,0 +1,119 @@
+name: Build Readest Preview APK
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: android-preview
+  cancel-in-progress: false
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      NEXT_TELEMETRY_DISABLED: '1'
+      CARGO_BUILD_JOBS: '2'
+      NODE_OPTIONS: --max-old-space-size=4096
+    steps:
+      - uses: actions/checkout@v4
+      - name: Checkout exact upstream source
+        uses: actions/checkout@v4
+        with:
+          repository: readest/readest
+          ref: 6e567ef3106a9bf6e6daa697760db66cc30b4b8a
+          path: source
+          persist-credentials: false
+      - name: Apply reviewed UI patch and load build submodules
+        working-directory: source
+        run: |
+          git apply --check ../reading-polish.patch
+          git apply ../reading-polish.patch
+          git submodule update --init --recursive packages/foliate-js packages/tauri packages/simplecc-wasm packages/qcms packages/js-mdict apps/readest-app/src-tauri/plugins/tauri-plugin-turso apps/readest-app/src-tauri/plugins/tauri-plugin-webview-upgrade
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.1.1
+          run_install: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: pnpm
+          cache-dependency-path: source/pnpm-lock.yaml
+      - uses: actions/setup-java@v4
+        with:
+          distribution: zulu
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+      - name: Install Android SDK and NDK
+        run: |
+          sdkmanager 'ndk;28.2.13676358' 'platforms;android-36' 'build-tools;36.0.0'
+          echo "NDK_HOME=$ANDROID_HOME/ndk/28.2.13676358" >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: source -> target
+          key: android-preview-arm64
+      - name: Install locked dependencies and reading assets
+        working-directory: source
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm --filter @readest/readest-app setup-vendors
+      - name: Regenerate Android scaffolding and restore upstream customizations
+        working-directory: source/apps/readest-app
+        run: |
+          rm -rf src-tauri/gen/android
+          pnpm tauri android init --ci
+          pnpm tauri icon ../../data/icons/readest-book.png
+          git restore -- src-tauri/gen/android
+      - name: Configure separate preview app
+        run: python3 prepare_preview.py
+      - name: Load private preview signing key
+        env:
+          PREVIEW_KEYSTORE: ${{ secrets.PREVIEW_KEYSTORE }}
+          PREVIEW_KEY_PASSWORD: ${{ secrets.PREVIEW_KEY_PASSWORD }}
+        run: |
+          python3 - <<'PY'
+          import os, base64
+          from pathlib import Path
+          key = Path(os.environ['RUNNER_TEMP']) / 'preview.jks'
+          key.write_bytes(base64.b64decode(os.environ['PREVIEW_KEYSTORE']))
+          key.chmod(0o600)
+          props = Path('source/apps/readest-app/src-tauri/gen/android/keystore.properties')
+          props.write_text('keyAlias=preview\npassword=' + os.environ['PREVIEW_KEY_PASSWORD'] + '\nstoreFile=' + str(key) + '\n')
+          props.chmod(0o600)
+          PY
+      - name: Build signed optimized ARM64 APK
+        working-directory: source/apps/readest-app
+        run: pnpm tauri android build --target aarch64 --apk --ci
+      - name: Verify package identity and signature
+        run: |
+          mkdir -p artifacts
+          python3 - <<'PY'
+          from pathlib import Path
+          import shutil
+          files = list(Path('source/apps/readest-app/src-tauri/gen/android/app/build/outputs/apk').rglob('*.apk'))
+          files = [p for p in files if 'unsigned' not in p.name and 'release' in p.name]
+          assert len(files) == 1, files
+          shutil.copy2(files[0], 'artifacts/Readest-Preview-arm64.apk')
+          PY
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --print-certs artifacts/Readest-Preview-arm64.apk
+          "$ANDROID_HOME/build-tools/36.0.0/aapt" dump badging artifacts/Readest-Preview-arm64.apk > artifacts/package-info.txt
+          python3 - <<'PY'
+          from pathlib import Path
+          info = Path('artifacts/package-info.txt').read_text()
+          assert "package: name='com.bilingify.readest.preview'" in info
+          assert "native-code: 'arm64-v8a'" in info
+          PY
+          cd artifacts && sha256sum Readest-Preview-arm64.apk > SHA256SUMS.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Readest-Preview-arm64
+          path: artifacts/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Remove signing material
+        if: always()
+        run: rm -f "$RUNNER_TEMP/preview.jks" source/apps/readest-app/src-tauri/gen/android/keystore.properties
