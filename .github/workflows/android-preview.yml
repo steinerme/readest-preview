@@ -31,6 +31,11 @@ jobs:
           git apply --check ../reading-polish.patch
           git apply ../reading-polish.patch
           git submodule update --init --recursive packages/foliate-js packages/tauri packages/simplecc-wasm packages/qcms packages/js-mdict apps/readest-app/src-tauri/plugins/tauri-plugin-turso apps/readest-app/src-tauri/plugins/tauri-plugin-webview-upgrade
+      - name: Apply PDF text extraction bridge patch
+        working-directory: source/packages/foliate-js
+        run: |
+          git apply --check ../../../foliate-reflow.patch
+          git apply ../../../foliate-reflow.patch
       - uses: pnpm/action-setup@v4
         with:
           version: 11.1.1

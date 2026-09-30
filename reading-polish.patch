@@ -1,3 +1,25 @@
+diff --git a/apps/readest-app/public/locales/zh-CN/translation.json b/apps/readest-app/public/locales/zh-CN/translation.json
+index 59cd398..f8a8a9c 100644
+--- a/apps/readest-app/public/locales/zh-CN/translation.json
++++ b/apps/readest-app/public/locales/zh-CN/translation.json
+@@ -2411,5 +2411,16 @@
+   "Sentence around the highlight": "高亮所在的句子",
+   "Do not speak readings or Hanja glosses in parentheses after a word": "不朗读词语后括号内的读音或汉字注释",
+   "Visible as {{name}}": "显示为 {{name}}",
+-  "Local Network": "局域网"
++  "Local Network": "局域网",
++  "PDF Text Reflow": "PDF 文字重排",
++  "Back to Original Page": "返回对应原页",
++  "Decrease Reflow Font Size": "减小重排字号",
++  "Increase Reflow Font Size": "增大重排字号",
++  "For single-column text PDFs. Images, tables and formulas are not reconstructed; check the original page when needed.": "适用于单栏文字 PDF。图片、表格和公式暂不重建，请按需对照原页。",
++  "Loading PDF text…": "正在提取本页文字…",
++  "Could not read this page. Please use the original PDF view.": "无法读取本页文字，请切回原版查看。",
++  "This page may not reflow correctly. Please compare it with the original.": "本页可能无法准确重排，请对照原页阅读。",
++  "No usable text on this page. View the original page; OCR is not included.": "本页没有可用文字，请查看原页。本版本不含 OCR。",
++  "Could not return to this PDF page.": "无法跳转到对应原页，可关闭重排后手动定位。",
++  "Original PDF Page": "PDF 原文件页码"
+ }
 diff --git a/apps/readest-app/src/__tests__/components/Dialog.test.tsx b/apps/readest-app/src/__tests__/components/Dialog.test.tsx
 new file mode 100644
 index 0000000..180455a
@@ -186,6 +208,145 @@ index f87ff3c..74afc29 100644
  });
  
  describe('HeaderBar sidebar toggle', () => {
+diff --git a/apps/readest-app/src/__tests__/components/PdfReflowDialog.test.tsx b/apps/readest-app/src/__tests__/components/PdfReflowDialog.test.tsx
+new file mode 100644
+index 0000000..572086c
+--- /dev/null
++++ b/apps/readest-app/src/__tests__/components/PdfReflowDialog.test.tsx
+@@ -0,0 +1,133 @@
++import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
++import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
++import PdfReflowDialog from '@/app/reader/components/PdfReflowDialog';
++import type { ReactNode } from 'react';
++
++const mocks = vi.hoisted(() => ({
++  pages: [] as Array<{ getReflowText?: () => Promise<unknown> }>,
++  goTo: vi.fn(),
++  index: 0,
++}));
++vi.mock('@/hooks/useTranslation', () => ({ useTranslation: () => (s: string) => s }));
++// Return a stable document object, matching the store's contract.
++const doc = {
++  get sections() {
++    return mocks.pages;
++  },
++};
++vi.mock('@/store/bookDataStore', () => ({
++  useBookDataStore: () => ({ getBookData: () => ({ bookDoc: doc }) }),
++}));
++vi.mock('@/store/readerStore', () => ({
++  useReaderStore: () => ({
++    getView: () => ({
++      renderer: {
++        get primaryIndex() {
++          return mocks.index;
++        },
++      },
++      goTo: mocks.goTo,
++    }),
++    getProgress: () => null,
++  }),
++}));
++vi.mock('@/components/Dialog', () => ({
++  default: ({ children, onClose }: { children: ReactNode; onClose: () => void }) => (
++    <div role='dialog'>
++      <button onClick={onClose}>Close dialog</button>
++      {children}
++    </div>
++  ),
++}));
++const textPage = (str: string) =>
++  Promise.resolve({
++    items: [{ str, transform: [14, 0, 0, 14, 60, 700], width: 300, height: 14 }],
++    width: 612,
++    height: 792,
++    rotation: 0,
++  });
++beforeEach(() => {
++  mocks.index = 0;
++  mocks.goTo.mockReset().mockImplementation(async (page: number) => {
++    mocks.index = page;
++  });
++  mocks.pages = [
++    { getReflowText: vi.fn(() => textPage('第一页正文。')) },
++    { getReflowText: vi.fn(() => textPage('第二页正文。')) },
++  ];
++});
++afterEach(cleanup);
++
++describe('PDF read-only reflow', () => {
++  it('starts at the original physical page and loads just that page', async () => {
++    mocks.index = 1;
++    render(<PdfReflowDialog bookKey='pdf-1' onClose={vi.fn()} />);
++    expect(await screen.findByText('第二页正文。')).toBeTruthy();
++    expect(mocks.pages[0]!.getReflowText).not.toHaveBeenCalled();
++    expect((screen.getByLabelText('Original PDF Page') as HTMLInputElement).value).toBe('2');
++    expect(mocks.goTo).not.toHaveBeenCalled();
++  });
++
++  it('adjusts font size without extracting again and returns to the selected original page', async () => {
++    const close = vi.fn();
++    const { container } = render(<PdfReflowDialog bookKey='pdf-1' onClose={close} />);
++    await screen.findByText('第一页正文。');
++    fireEvent.click(screen.getByLabelText('Increase Reflow Font Size'));
++    expect(container.querySelector('article')!.style.fontSize).toBe('24px');
++    expect(mocks.pages[0]!.getReflowText).toHaveBeenCalledTimes(1);
++    fireEvent.click(screen.getByText('Next Page'));
++    await screen.findByText('第二页正文。');
++    fireEvent.click(screen.getByText('Back to Original Page'));
++    await waitFor(() => expect(close).toHaveBeenCalledOnce());
++    expect(mocks.goTo).toHaveBeenCalledWith(1);
++  });
++
++  it('shows an empty-page fallback instead of pretending to OCR', async () => {
++    mocks.pages = [
++      { getReflowText: () => Promise.resolve({ items: [], width: 612, height: 792, rotation: 0 }) },
++    ];
++    render(<PdfReflowDialog bookKey='pdf-1' onClose={vi.fn()} />);
++    expect(
++      await screen.findByText(
++        'No usable text on this page. View the original page; OCR is not included.',
++      ),
++    ).toBeTruthy();
++  });
++
++  it('ignores a stale extraction after changing pages', async () => {
++    let resolve!: (value: unknown) => void;
++    mocks.pages[0] = {
++      getReflowText: () =>
++        new Promise((r) => {
++          resolve = r;
++        }),
++    };
++    render(<PdfReflowDialog bookKey='pdf-1' onClose={vi.fn()} />);
++    fireEvent.click(screen.getByText('Next Page'));
++    await screen.findByText('第二页正文。');
++    await act(async () => {
++      resolve(await textPage('不应出现的旧页。'));
++    });
++    expect(screen.queryByText('不应出现的旧页。')).toBeNull();
++    expect(screen.getByText('第二页正文。')).toBeTruthy();
++  });
++
++  it('escapes PDF content instead of interpreting HTML', async () => {
++    mocks.pages[0] = { getReflowText: () => textPage('<img src=x onerror=alert(1)>') };
++    const { container } = render(<PdfReflowDialog bookKey='pdf-1' onClose={vi.fn()} />);
++    await screen.findByText('<img src=x onerror=alert(1)>');
++    expect(container.querySelector('article img')).toBeNull();
++  });
++
++  it('reports errors and permits closing when original navigation fails', async () => {
++    mocks.goTo.mockRejectedValue(new Error('closed viewer'));
++    const close = vi.fn();
++    render(<PdfReflowDialog bookKey='pdf-1' onClose={close} />);
++    await screen.findByText('第一页正文。');
++    fireEvent.click(screen.getByText('Back to Original Page'));
++    await screen.findByText('Could not return to this PDF page.');
++    expect(close).not.toHaveBeenCalled();
++    fireEvent.click(screen.getByText('Close'));
++    expect(close).toHaveBeenCalledOnce();
++  });
++});
 diff --git a/apps/readest-app/src/__tests__/components/ReadingPanels.test.tsx b/apps/readest-app/src/__tests__/components/ReadingPanels.test.tsx
 new file mode 100644
 index 0000000..512b45b
@@ -278,6 +439,89 @@ index 0000000..512b45b
 +    expect(panel.getAttribute('aria-hidden')).toBe('false');
 +  });
 +});
+diff --git a/apps/readest-app/src/__tests__/foliate-pdf-reflow.test.ts b/apps/readest-app/src/__tests__/foliate-pdf-reflow.test.ts
+new file mode 100644
+index 0000000..52535d5
+--- /dev/null
++++ b/apps/readest-app/src/__tests__/foliate-pdf-reflow.test.ts
+@@ -0,0 +1,77 @@
++import { describe, expect, it, vi } from 'vitest';
++
++const mocks = vi.hoisted(() => ({
++  items: [
++    {
++      str: '正文',
++      width: 30,
++      height: 14,
++      transform: [14, 0, 0, 14, 80, 700],
++      hasEOL: true,
++      dir: 'ltr',
++    },
++    { type: 'beginMarkedContent' },
++  ],
++  destroy: vi.fn(),
++  render: vi.fn(),
++}));
++vi.mock('@pdfjs/pdf.min.mjs', () => {
++  class PDFDataRangeTransport {
++    onDataRange = vi.fn();
++  }
++  (globalThis as unknown as { pdfjsLib: unknown }).pdfjsLib = {
++    GlobalWorkerOptions: {},
++    PDFDataRangeTransport,
++    getDocument: () => ({
++      destroy: mocks.destroy,
++      promise: Promise.resolve({
++        numPages: 1,
++        getPage: async () => ({
++          view: [20, 30, 620, 830],
++          rotate: 0,
++          getViewport: () => ({ width: 600, height: 800 }),
++          getTextContent: async () => ({ items: mocks.items }),
++          render: mocks.render,
++          cleanup: vi.fn(),
++        }),
++        getMetadata: async () => ({ info: {} }),
++        getViewerPreferences: async () => null,
++        getOutline: async () => null,
++        getPageLabels: async () => null,
++      }),
++    }),
++  };
++  return {};
++});
++
++describe('PDF section reflow text API', () => {
++  it('normalizes crop-box origin without rendering or modifying original items', async () => {
++    const { makePDF } = await import('foliate-js/pdf.js');
++    const book = (await makePDF({
++      size: 1,
++      slice: () => ({ arrayBuffer: async () => new ArrayBuffer(0) }),
++    })) as unknown as {
++      sections: {
++        getReflowText: () => Promise<{
++          items: import('@/utils/pdfReflow').PdfTextItem[];
++          width: number;
++          height: number;
++          rotation: number;
++        }>;
++      }[];
++      destroy: () => void;
++    };
++    const before = JSON.stringify(mocks.items);
++    const data = await book.sections[0]!.getReflowText();
++    expect(data.width).toBe(600);
++    expect(data.height).toBe(800);
++    expect(data.rotation).toBe(0);
++    expect(data.items).toHaveLength(1);
++    expect(data.items[0]!.transform).toEqual([14, 0, 0, 14, 60, 670]);
++    expect(data.items[0]!.str).toBe('正文');
++    expect(mocks.render).not.toHaveBeenCalled();
++    expect(JSON.stringify(mocks.items)).toBe(before);
++    book.destroy();
++    expect(mocks.destroy).toHaveBeenCalledOnce();
++  });
++});
 diff --git a/apps/readest-app/src/__tests__/styles/reading-polish.browser.test.ts b/apps/readest-app/src/__tests__/styles/reading-polish.browser.test.ts
 new file mode 100644
 index 0000000..d3099ab
@@ -356,6 +600,201 @@ index 0000000..d3099ab
 +    expect(el.getAnimations()).toHaveLength(0);
 +    el.dataset['state'] = 'closed';
 +    expect(settle(el).visibility).toBe('hidden');
++  });
++});
+diff --git a/apps/readest-app/src/__tests__/utils/pdfReflow.test.ts b/apps/readest-app/src/__tests__/utils/pdfReflow.test.ts
+new file mode 100644
+index 0000000..7f1c06a
+--- /dev/null
++++ b/apps/readest-app/src/__tests__/utils/pdfReflow.test.ts
+@@ -0,0 +1,189 @@
++import { describe, expect, it } from 'vitest';
++import { reflowPdfText, type PdfTextItem } from '@/utils/pdfReflow';
++
++const item = (
++  str: string,
++  x: number,
++  y: number,
++  size = 12,
++  width = str.length * size * 0.5,
++): PdfTextItem => ({
++  str,
++  transform: [size, 0, 0, size, x, y],
++  width,
++  height: size,
++});
++const reflow = (items: PdfTextItem[]) => reflowPdfText(items, 600, 800);
++
++describe('reflowPdfText', () => {
++  it('orders raw PDF baselines top-down and fragments left-right without mutating input', () => {
++    const items = [item('world', 88, 700), item('Next line.', 50, 684), item('Hello', 50, 700)];
++    const snapshot = JSON.stringify(items);
++    expect(reflow(items).blocks).toEqual([{ kind: 'paragraph', text: 'Hello world Next line.' }]);
++    expect(JSON.stringify(items)).toBe(snapshot);
++  });
++
++  it('joins CJK line wraps and Latin words with language-aware punctuation', () => {
++    const result = reflow([
++      item('中文', 50, 700),
++      item('段落，', 76, 700),
++      item('第二行。', 50, 684),
++      item('Hello', 50, 640),
++      item(',', 81, 640),
++      item('world', 90, 640),
++      item('again.', 50, 624),
++    ]);
++    expect(result.blocks).toEqual([
++      { kind: 'paragraph', text: '中文段落，第二行。' },
++      { kind: 'paragraph', text: 'Hello, world again.' },
++    ]);
++  });
++
++  it('keeps split Latin glyphs together but honors real whitespace', () => {
++    expect(
++      reflow([item('read', 50, 700), item('ing ', 74, 700), item('text', 92, 700)]).blocks[0]?.text,
++    ).toBe('reading text');
++  });
++
++  it('attaches small superscripts to the body baseline without creating notes', () => {
++    expect(
++      reflow([
++        item('2', 62, 705, 7, 4),
++        item('E=', 66, 700),
++        item('x', 50, 700),
++        item('A continued body sentence.', 50, 684),
++      ]).blocks,
++    ).toEqual([{ kind: 'paragraph', text: 'x2E= A continued body sentence.' }]);
++  });
++
++  it('uses transform font size rather than an anomalous italic glyph height', () => {
++    const italic = item('Italic body text continues', 50, 700);
++    italic.transform = [12, 0, 3, Math.sqrt(135), 50, 700];
++    italic.height = 150;
++    expect(reflow([italic, item('on another line.', 50, 684)]).blocks).toEqual([
++      { kind: 'paragraph', text: 'Italic body text continues on another line.' },
++    ]);
++  });
++
++  it('starts a new paragraph on a large baseline gap', () => {
++    expect(
++      reflow([
++        item('First line', 50, 700),
++        item('continues.', 50, 684),
++        item('Next paragraph.', 50, 645),
++      ]).blocks,
++    ).toHaveLength(2);
++  });
++
++  it('preserves independent small-font notes and joins their wrapped lines', () => {
++    expect(
++      reflow([
++        item('This is a sufficiently long body paragraph to establish body size.', 50, 700),
++        item('Body continues on this second line.', 50, 684),
++        item('1 Note text', 50, 100, 8),
++        item('continued here.', 50, 89, 8),
++      ]).blocks,
++    ).toEqual([
++      {
++        kind: 'paragraph',
++        text: 'This is a sufficiently long body paragraph to establish body size. Body continues on this second line.',
++      },
++      { kind: 'note', text: '1 Note text continued here.' },
++    ]);
++  });
++
++  it('splits an independent small-font line even inside the page body', () => {
++    const result = reflow([
++      item('A full length normal body sentence precedes the note.', 50, 700),
++      item('Small standalone note.', 50, 680, 8),
++      item('Another full length body sentence follows the note.', 50, 660),
++    ]);
++    expect(result.blocks.map((block) => block.kind)).toEqual(['paragraph', 'note', 'paragraph']);
++  });
++
++  it('removes isolated pure numeric page numbers at both page edges', () => {
++    const result = reflow([item('7', 295, 775), item('正文完整段落', 50, 700), item('8', 295, 25)]);
++    expect(result.removedPageNumbers).toEqual(['7', '8']);
++    expect(result.blocks).toEqual([{ kind: 'paragraph', text: '正文完整段落' }]);
++  });
++
++  it('preserves body years, margin years, and body-only numeric lines', () => {
++    const result = reflow([
++      item('2024', 280, 775),
++      item('History in', 50, 700),
++      item('2023', 50, 684),
++      item('42', 50, 668),
++      item('2025', 280, 25),
++    ]);
++    expect(result.removedPageNumbers).toEqual([]);
++    for (const text of ['2024', '2023', '42', '2025']) {
++      expect(result.blocks.some((block) => block.text.includes(text))).toBe(true);
++    }
++  });
++
++  it('does not delete edge digits that are close to nearby text', () => {
++    expect(reflow([item('A footer label', 50, 42), item('9', 50, 28)]).removedPageNumbers).toEqual(
++      [],
++    );
++  });
++
++  it('warns on empty or whitespace-only extraction', () => {
++    expect(reflow([])).toEqual({ blocks: [], removedPageNumbers: [], warnings: ['empty-text'] });
++    expect(reflow([item(' \n\t ', 50, 700)]).warnings).toContain('empty-text');
++  });
++
++  it('warns on repeated wide gaps suggesting multiple columns without losing text', () => {
++    const result = reflow([
++      item('Left A', 50, 700),
++      item('Right A', 350, 700),
++      item('Left B', 50, 684),
++      item('Right B', 350, 684),
++    ]);
++    expect(result.warnings).toContain('possible-multiple-columns');
++    expect(result.blocks).toHaveLength(2);
++    expect(result.blocks.map((block) => block.text).join(' ')).toBe(
++      'Left A Right A Left B Right B',
++    );
++  });
++
++  it('warns once about rotation and retains unsupported rotated text separately', () => {
++    const first = item('Rotated', 50, 700);
++    first.transform = [0, 12, -12, 0, 50, 700];
++    const second = item('Vertical', 100, 600);
++    second.dir = 'ttb';
++    const result = reflow([first, second]);
++    expect(result.warnings).toEqual(['rotated-text']);
++    expect(result.blocks.map((block) => block.text)).toEqual(['Rotated', 'Vertical']);
++  });
++
++  it('ignores hasEOL on fragments when geometry still places them on one line', () => {
++    const first = item('Hello', 50, 700);
++    first.hasEOL = true;
++    expect(reflow([first, item('world', 88, 700)]).blocks[0]?.text).toBe('Hello world');
++  });
++
++  it('removes only soft wrap hyphens and preserves visible compound hyphens', () => {
++    expect(reflow([item('inter\u00ad', 50, 700), item('national', 50, 684)]).blocks[0]?.text).toBe(
++      'international',
++    );
++    expect(reflow([item('well-', 50, 700), item('known', 50, 684)]).blocks[0]?.text).toBe(
++      'well-known',
++    );
++  });
++
++  it('separates an indented paragraph from a preceding unindented line', () => {
++    expect(
++      reflow([item('Previous sentence.', 50, 700), item('New paragraph.', 74, 684)]).blocks,
++    ).toHaveLength(2);
++  });
++
++  it('rejects invalid coordinates without corrupting valid text', () => {
++    const broken = item('Broken', 50, 700);
++    broken.transform[5] = NaN;
++    expect(reflow([broken, item('Valid', 50, 684)])).toEqual({
++      blocks: [{ kind: 'paragraph', text: 'Valid' }],
++      removedPageNumbers: [],
++      warnings: ['invalid-text-item'],
++    });
 +  });
 +});
 diff --git a/apps/readest-app/src/app/library/components/BookItem.tsx b/apps/readest-app/src/app/library/components/BookItem.tsx
@@ -515,18 +954,27 @@ index 9cedc20..716a88f 100644
                  'placeholder:text-base-content/50 truncate',
                  'focus:outline-hidden focus:ring-0',
 diff --git a/apps/readest-app/src/app/reader/components/HeaderBar.tsx b/apps/readest-app/src/app/reader/components/HeaderBar.tsx
-index 58f1135..4dc1d5e 100644
+index 58f1135..712bb11 100644
 --- a/apps/readest-app/src/app/reader/components/HeaderBar.tsx
 +++ b/apps/readest-app/src/app/reader/components/HeaderBar.tsx
-@@ -33,6 +33,7 @@ import NotebookToggler from './NotebookToggler';
+@@ -33,6 +33,8 @@ import NotebookToggler from './NotebookToggler';
  import TranslationToggler from './TranslationToggler';
  import ViewMenu from './ViewMenu';
  import SyncInfoDialog from './SyncInfoDialog';
++import PdfReflowDialog from './PdfReflowDialog';
 +import '@/styles/reader-polish.css';
  
  interface HeaderBarProps {
    bookKey: string;
-@@ -221,9 +222,12 @@ const HeaderBar: React.FC<HeaderBarProps> = ({
+@@ -85,6 +87,7 @@ const HeaderBar: React.FC<HeaderBarProps> = ({
+ 
+   const [isDropdownOpen, setIsDropdownOpen] = useState(false);
+   const [isMetaHashDialogOpen, setIsMetaHashDialogOpen] = useState(false);
++  const [isPdfReflowOpen, setIsPdfReflowOpen] = useState(false);
+   const [headerWidth, setHeaderWidth] = useState(0);
+   const view = getView(bookKey);
+   const iconSize18 = useResponsiveSize(18);
+@@ -221,9 +224,12 @@ const HeaderBar: React.FC<HeaderBarProps> = ({
          ref={headerRef}
          role='banner'
          aria-label={_('Header Bar')}
@@ -541,6 +989,320 @@ index 58f1135..4dc1d5e 100644
            trafficLightInHeader ? 'pl-20' : isSideBarVisible ? 'ps-4' : 'ps-4 sm:ps-1.5',
            appService?.hasRoundedWindow && 'rounded-window-top-right',
            !isSideBarVisible && appService?.hasRoundedWindow && 'rounded-window-top-left',
+@@ -343,8 +349,18 @@ const HeaderBar: React.FC<HeaderBarProps> = ({
+             <ViewMenu
+               bookKey={bookKey}
+               onShowMetaHashDialog={() => setIsMetaHashDialogOpen(true)}
++              onOpenPdfReflow={() => setIsPdfReflowOpen(true)}
+             />
+           </Dropdown>
++          {isPdfReflowOpen && bookData?.book?.format === 'PDF' && (
++            <ModalPortal showOverlay={false}>
++              <PdfReflowDialog
++                key={bookKey}
++                bookKey={bookKey}
++                onClose={() => setIsPdfReflowOpen(false)}
++              />
++            </ModalPortal>
++          )}
+           {isMetaHashDialogOpen && (
+             <ModalPortal showOverlay={false}>
+               <SyncInfoDialog
+diff --git a/apps/readest-app/src/app/reader/components/PdfReflowDialog.tsx b/apps/readest-app/src/app/reader/components/PdfReflowDialog.tsx
+new file mode 100644
+index 0000000..b9eb6e8
+--- /dev/null
++++ b/apps/readest-app/src/app/reader/components/PdfReflowDialog.tsx
+@@ -0,0 +1,254 @@
++import { useEffect, useRef, useState } from 'react';
++import Dialog from '@/components/Dialog';
++import { useBookDataStore } from '@/store/bookDataStore';
++import { useReaderStore } from '@/store/readerStore';
++import { useTranslation } from '@/hooks/useTranslation';
++import { reflowPdfText, type ReflowPage } from '@/utils/pdfReflow';
++import '@/styles/pdf-reflow.css';
++
++interface Props {
++  bookKey: string;
++  onClose: () => void;
++}
++
++/** Intentionally read-only, page-based reflow. Never creates synthetic CFIs or
++ * writes annotations/positions into the original document while reading text. */
++const PdfReflowDialog = ({ bookKey, onClose }: Props) => {
++  const _ = useTranslation();
++  const { getBookData } = useBookDataStore();
++  const { getView, getProgress } = useReaderStore();
++  const bookDoc = getBookData(bookKey)?.bookDoc;
++  const count = bookDoc?.sections.length ?? 0;
++  const [page, setPage] = useState(() => {
++    const index =
++      getView(bookKey)?.renderer.primaryIndex ?? getProgress(bookKey)?.section.current ?? 0;
++    return Math.max(0, Math.min(count - 1, Number.isFinite(index) ? index : 0));
++  });
++  const [pageInput, setPageInput] = useState(String(page + 1));
++  const [fontSize, setFontSize] = useState(22);
++  const [lineHeight, setLineHeight] = useState(1.85);
++  const [result, setResult] = useState<ReflowPage | null>(null);
++  const [busy, setBusy] = useState(true);
++  const [error, setError] = useState(false);
++  const [returnError, setReturnError] = useState(false);
++  const [returning, setReturning] = useState(false);
++  const scrollRef = useRef<HTMLElement>(null);
++  const cacheRef = useRef(new Map<number, ReflowPage>());
++  const mounted = useRef(true);
++
++  useEffect(() => {
++    mounted.current = true;
++    return () => {
++      mounted.current = false;
++    };
++  }, []);
++
++  useEffect(() => {
++    let current = true;
++    setPageInput(String(page + 1));
++    setResult(null);
++    setBusy(true);
++    setError(false);
++    setReturnError(false);
++    if (scrollRef.current) scrollRef.current.scrollTop = 0;
++    const load = async () => {
++      try {
++        let parsed = cacheRef.current.get(page);
++        if (!parsed) {
++          const section = bookDoc?.sections[page];
++          if (!section?.getReflowText) throw new Error('PDF text unavailable');
++          const data = await section.getReflowText();
++          // Coordinate reconstruction here only supports upright single columns.
++          parsed =
++            data.rotation % 360 !== 0
++              ? { blocks: [], removedPageNumbers: [], warnings: ['rotated-page'] }
++              : reflowPdfText(data.items, data.width, data.height);
++          if (!current) return;
++          cacheRef.current.set(page, parsed);
++          while (cacheRef.current.size > 12) {
++            const oldest = cacheRef.current.keys().next().value;
++            if (oldest !== undefined) cacheRef.current.delete(oldest);
++          }
++        }
++        if (current) setResult(parsed);
++      } catch {
++        if (current) setError(true);
++      } finally {
++        if (current) setBusy(false);
++      }
++    };
++    void load();
++    return () => {
++      current = false;
++    };
++  }, [bookDoc, page]);
++
++  const returnToOriginal = async () => {
++    if (returning) return;
++    const view = getView(bookKey);
++    if (!view || !count) {
++      onClose();
++      return;
++    }
++    setReturning(true);
++    setReturnError(false);
++    try {
++      // PDF foliate sections are physical, zero-based page indices. Navigate
++      // through the public viewer API so normal progress saving still applies.
++      await view.goTo(page);
++      // Foliate catches some navigation errors internally; confirm arrival
++      // instead of closing and silently leaving the reader on the wrong page.
++      if (view.renderer.primaryIndex !== page) throw new Error('PDF page navigation failed');
++      if (mounted.current) onClose();
++    } catch {
++      if (mounted.current) setReturnError(true);
++    } finally {
++      if (mounted.current) setReturning(false);
++    }
++  };
++
++  const goPage = (next: number) => {
++    if (!Number.isInteger(next) || next < 0 || next >= count) {
++      setPageInput(String(page + 1));
++      return;
++    }
++    setPage(next);
++  };
++
++  return (
++    <Dialog
++      isOpen
++      fullScreen
++      title={_('PDF Text Reflow')}
++      onClose={() => {
++        void returnToOriginal();
++      }}
++      boxClassName='pdf-reflow-dialog'
++      contentClassName='pdf-reflow-body'
++    >
++      <div className='pdf-reflow-controls'>
++        <div className='pdf-reflow-control-row'>
++          <button
++            type='button'
++            onClick={() => {
++              void returnToOriginal();
++            }}
++            disabled={returning}
++          >
++            {_('Back to Original Page')}
++          </button>
++          <div className='pdf-reflow-font-controls'>
++            <button
++              type='button'
++              aria-label={_('Decrease Reflow Font Size')}
++              disabled={fontSize <= 16}
++              onClick={() => setFontSize((n) => Math.max(16, n - 2))}
++            >
++              A−
++            </button>
++            <output aria-label={_('Font Size')}>{fontSize}</output>
++            <button
++              type='button'
++              aria-label={_('Increase Reflow Font Size')}
++              disabled={fontSize >= 36}
++              onClick={() => setFontSize((n) => Math.min(36, n + 2))}
++            >
++              A＋
++            </button>
++          </div>
++        </div>
++        <label className='pdf-reflow-spacing'>
++          {_('Line Spacing')}
++          <select value={lineHeight} onChange={(e) => setLineHeight(Number(e.target.value))}>
++            <option value={1.5}>1.5</option>
++            <option value={1.85}>1.85</option>
++            <option value={2.2}>2.2</option>
++          </select>
++        </label>
++        <p className='pdf-reflow-notice'>
++          {_(
++            'For single-column text PDFs. Images, tables and formulas are not reconstructed; check the original page when needed.',
++          )}
++        </p>
++      </div>
++      <article
++        ref={scrollRef}
++        className='pdf-reflow-page'
++        aria-busy={busy}
++        style={{ fontSize: `${fontSize}px`, lineHeight }}
++      >
++        {busy && <p role='status'>{_('Loading PDF text…')}</p>}
++        {error && (
++          <p role='alert'>{_('Could not read this page. Please use the original PDF view.')}</p>
++        )}
++        {!busy && result && (
++          <>
++            {result.warnings.length > 0 && (
++              <p className='pdf-reflow-warning' role='status'>
++                {_('This page may not reflow correctly. Please compare it with the original.')}
++              </p>
++            )}
++            {result.blocks.length === 0 && (
++              <p>
++                {_('No usable text on this page. View the original page; OCR is not included.')}
++              </p>
++            )}
++            {result.blocks.map((block, i) =>
++              block.kind === 'note' ? (
++                <aside className='pdf-reflow-note' key={i}>
++                  {block.text}
++                </aside>
++              ) : (
++                <p key={i}>{block.text}</p>
++              ),
++            )}
++          </>
++        )}
++      </article>
++      {returnError && (
++        <div role='alert' className='pdf-reflow-warning'>
++          {_('Could not return to this PDF page.')}
++          <button type='button' onClick={onClose}>
++            {_('Close')}
++          </button>
++        </div>
++      )}
++      <form
++        className='pdf-reflow-pagination'
++        onSubmit={(e) => {
++          e.preventDefault();
++          goPage(Number(pageInput) - 1);
++        }}
++      >
++        <button type='button' disabled={page <= 0 || returning} onClick={() => goPage(page - 1)}>
++          {_('Previous Page')}
++        </button>
++        <label>
++          <span className='sr-only'>{_('Original PDF Page')}</span>
++          <input
++            aria-label={_('Original PDF Page')}
++            inputMode='numeric'
++            type='number'
++            min={1}
++            max={count}
++            value={pageInput}
++            onChange={(e) => setPageInput(e.target.value)}
++          />
++          <span> / {count}</span>
++        </label>
++        <button type='submit' disabled={returning}>
++          {_('Go')}
++        </button>
++        <button
++          type='button'
++          disabled={page >= count - 1 || returning}
++          onClick={() => goPage(page + 1)}
++        >
++          {_('Next Page')}
++        </button>
++      </form>
++    </Dialog>
++  );
++};
++
++export default PdfReflowDialog;
+diff --git a/apps/readest-app/src/app/reader/components/ViewMenu.tsx b/apps/readest-app/src/app/reader/components/ViewMenu.tsx
+index c6b8210..59c8c13 100644
+--- a/apps/readest-app/src/app/reader/components/ViewMenu.tsx
++++ b/apps/readest-app/src/app/reader/components/ViewMenu.tsx
+@@ -47,12 +47,14 @@ interface ViewMenuProps {
+   bookKey: string;
+   setIsDropdownOpen?: (open: boolean) => void;
+   onShowMetaHashDialog?: () => void;
++  onOpenPdfReflow?: () => void;
+ }
+ 
+ const ViewMenu: React.FC<ViewMenuProps> = ({
+   bookKey,
+   setIsDropdownOpen,
+   onShowMetaHashDialog,
++  onOpenPdfReflow,
+ }) => {
+   const _ = useTranslation();
+   const router = useRouter();
+@@ -589,6 +591,15 @@ const ViewMenu: React.FC<ViewMenuProps> = ({
+         }
+         onClick={cycleThemeMode}
+       />
++      {bookData.book?.format === 'PDF' && onOpenPdfReflow && (
++        <MenuItem
++          label={_('PDF Text Reflow')}
++          onClick={() => {
++            setIsDropdownOpen?.(false);
++            onOpenPdfReflow();
++          }}
++        />
++      )}
+       <MenuItem label={_('Settings')} Icon={PiGear} onClick={openSettingsDialog} />
+       {bookData.book?.format === 'PDF' && appService?.supportsCanvasContext2DFilter && (
+         <MenuItem
 diff --git a/apps/readest-app/src/app/reader/components/footerbar/ColorPanel.tsx b/apps/readest-app/src/app/reader/components/footerbar/ColorPanel.tsx
 index b7957d4..1a122fe 100644
 --- a/apps/readest-app/src/app/reader/components/footerbar/ColorPanel.tsx
@@ -841,6 +1603,24 @@ index c6666dc..d9e8b57 100644
          className,
        )}
        dir={isRtl ? 'rtl' : undefined}
+diff --git a/apps/readest-app/src/libs/document.ts b/apps/readest-app/src/libs/document.ts
+index 96f5ed9..985e83b 100644
+--- a/apps/readest-app/src/libs/document.ts
++++ b/apps/readest-app/src/libs/document.ts
+@@ -50,6 +50,13 @@ export interface SectionItem {
+   // Resolve a reference a script introduces after load (see observeDynamicResources).
+   loadHref?: (href: string) => Promise<string>;
+   createDocument: () => Promise<Document>;
++  // Available only for PDF sections; original page coordinates, no canvas.
++  getReflowText?: () => Promise<{
++    items: import('@/utils/pdfReflow').PdfTextItem[];
++    width: number;
++    height: number;
++    rotation: number;
++  }>;
+ 
+   // EPUB 3 Media Overlays: the manifest item of this section's SMIL file, or
+   // null when the section has no recorded narration. Populated by foliate's
 diff --git a/apps/readest-app/src/styles/dialog-polish.css b/apps/readest-app/src/styles/dialog-polish.css
 new file mode 100644
 index 0000000..3af3154
@@ -1047,6 +1827,127 @@ index 0000000..9961e02
 +  border-color: var(--color-base-content);
 +  background-color: var(--color-base-100);
 +}
+diff --git a/apps/readest-app/src/styles/pdf-reflow.css b/apps/readest-app/src/styles/pdf-reflow.css
+new file mode 100644
+index 0000000..c767abd
+--- /dev/null
++++ b/apps/readest-app/src/styles/pdf-reflow.css
+@@ -0,0 +1,115 @@
++.pdf-reflow-dialog .pdf-reflow-body {
++  display: flex;
++  flex-direction: column;
++  min-height: 0;
++  overflow: hidden;
++  margin: 0;
++  padding: 0;
++  color: var(--color-base-content);
++  background: var(--color-base-100);
++}
++.pdf-reflow-controls {
++  padding: 8px 20px 10px;
++  border-bottom: 1px solid var(--color-base-300);
++}
++.pdf-reflow-control-row,
++.pdf-reflow-font-controls,
++.pdf-reflow-pagination {
++  display: flex;
++  align-items: center;
++  justify-content: space-between;
++  gap: 8px;
++}
++.pdf-reflow-dialog button,
++.pdf-reflow-dialog select,
++.pdf-reflow-pagination input {
++  min-height: 44px;
++  border: 1px solid var(--color-base-300);
++  border-radius: 10px;
++  padding: 6px 10px;
++  color: inherit;
++  background: var(--color-base-100);
++  font-size: 14px;
++}
++.pdf-reflow-dialog button:disabled {
++  opacity: 0.4;
++  cursor: default;
++}
++.pdf-reflow-dialog button:focus-visible,
++.pdf-reflow-dialog input:focus-visible,
++.pdf-reflow-dialog select:focus-visible {
++  outline: 2px solid var(--color-primary) !important;
++  outline-offset: 2px;
++}
++.pdf-reflow-font-controls button {
++  min-width: 44px;
++}
++.pdf-reflow-spacing {
++  display: flex;
++  align-items: center;
++  gap: 12px;
++  margin-block-start: 8px;
++  font-size: 13px;
++}
++.pdf-reflow-notice {
++  font-size: 12px;
++  line-height: 1.6;
++  margin-top: 8px;
++  opacity: 0.7;
++}
++.pdf-reflow-page {
++  flex: 1;
++  min-height: 0;
++  width: 100%;
++  overflow-y: auto;
++  overscroll-behavior: contain;
++  padding: 24px max(24px, calc((100% - 700px) / 2));
++  overflow-wrap: anywhere;
++  user-select: text;
++  -webkit-user-select: text;
++}
++.pdf-reflow-page p {
++  margin: 0 0 1.15em;
++  white-space: pre-wrap;
++}
++.pdf-reflow-note {
++  font-size: 0.78em;
++  line-height: 1.75;
++  margin-block: 1.6em;
++  padding-inline-start: 12px;
++  border-inline-start: 2px solid var(--color-base-300);
++  white-space: pre-wrap;
++}
++.pdf-reflow-warning {
++  font-size: 14px;
++  padding: 12px;
++  border: 1px solid var(--color-base-300);
++}
++.pdf-reflow-pagination {
++  padding: 10px 14px max(12px, env(safe-area-inset-bottom));
++  border-top: 1px solid var(--color-base-300);
++  flex-wrap: wrap;
++  justify-content: center;
++}
++.pdf-reflow-pagination input {
++  width: 65px;
++  text-align: center;
++}
++@media (max-height: 550px) {
++  .pdf-reflow-notice {
++    display: none;
++  }
++  .pdf-reflow-controls {
++    display: flex;
++    flex-wrap: wrap;
++    gap: 8px;
++  }
++  .pdf-reflow-spacing {
++    margin: 0;
++  }
++}
++html[data-eink='true'] .pdf-reflow-dialog button:disabled {
++  opacity: 1;
++  color: var(--color-base-content);
++  border-style: dashed;
++}
 diff --git a/apps/readest-app/src/styles/reader-polish.css b/apps/readest-app/src/styles/reader-polish.css
 new file mode 100644
 index 0000000..99f9587
@@ -1169,6 +2070,293 @@ index 0000000..9a305ab
 +  const safeVelocity = Number.isFinite(velocity) ? Math.max(velocity, 0.5) : 0.5;
 +  return Math.round(Math.min(MAX_SWIPE_CLOSE_MS, Math.max(MIN_SWIPE_CLOSE_MS, 150 / safeVelocity)));
 +};
+diff --git a/apps/readest-app/src/utils/pdfReflow.ts b/apps/readest-app/src/utils/pdfReflow.ts
+new file mode 100644
+index 0000000..d96f23e
+--- /dev/null
++++ b/apps/readest-app/src/utils/pdfReflow.ts
+@@ -0,0 +1,234 @@
++export interface PdfTextItem {
++  str: string;
++  transform: number[];
++  width: number;
++  height: number;
++  hasEOL?: boolean;
++  dir?: string;
++}
++
++export interface ReflowBlock {
++  kind: 'paragraph' | 'note';
++  text: string;
++}
++
++export interface ReflowPage {
++  blocks: ReflowBlock[];
++  removedPageNumbers: string[];
++  warnings: string[];
++}
++
++type Run = { text: string; x: number; y: number; size: number; width: number; rotated: boolean };
++type Line = { runs: Run[]; y: number; size: number; x: number; end: number; text: string };
++
++const cjk = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u;
++const closing = /^[,.;:!?，。；：！？、）】》」』〉〕］｝％%…]/u;
++const opening = /[(（【《「『〈〔［｛]$/u;
++
++function median(values: number[]): number {
++  if (!values.length) return 0;
++  const sorted = [...values].sort((a, b) => a - b);
++  const mid = Math.floor(sorted.length / 2);
++  return sorted.length % 2 ? sorted[mid]! : (sorted[mid - 1]! + sorted[mid]!) / 2;
++}
++
++function textSize(runs: Run[]): number {
++  const sorted = [...runs].sort((a, b) => a.size - b.size);
++  const total = sorted.reduce((n, run) => n + Math.max(1, run.text.trim().length), 0);
++  let weight = 0;
++  for (const run of sorted) {
++    weight += Math.max(1, run.text.trim().length);
++    if (weight >= total / 2) return run.size;
++  }
++  return 1;
++}
++
++// Geometry decides word spacing inside a line. Across wrapped lines, Latin
++// words need a space; CJK and punctuation do not. Only discretionary soft
++// hyphens are removed: a visible hyphen may be part of a compound or identifier.
++function joinText(left: string, right: string, space: boolean, wrapped = false): string {
++  if (!left) return right.trim();
++  if (!right.trim()) return left;
++  const a = left.trimEnd();
++  const b = right.trimStart();
++  if (wrapped && a.endsWith('\u00ad')) return a.slice(0, -1) + b;
++  if (wrapped && /[A-Za-z]-$/.test(a) && /^[a-z]/.test(b)) return a + b;
++  const last = Array.from(a).pop() || '';
++  const first = Array.from(b)[0] || '';
++  if (cjk.test(last) || cjk.test(first) || closing.test(b) || opening.test(a)) return a + b;
++  return a + (space ? ' ' : '') + b;
++}
++
++/**
++ * Conservative, dependency-free reflow for single-column horizontal pages.
++ * Coordinates are unmodified PDF coordinates (larger baseline y is higher).
++ * Warnings are stable codes: empty-text, rotated-text,
++ * possible-multiple-columns, invalid-text-item. Suspected columns are retained
++ * in visual row order, not silently discarded or claimed to be fully reflowed.
++ */
++export function reflowPdfText(
++  items: PdfTextItem[],
++  pageWidth: number,
++  pageHeight: number,
++): ReflowPage {
++  const result: ReflowPage = { blocks: [], removedPageNumbers: [], warnings: [] };
++  const warn = (code: string) => {
++    if (!result.warnings.includes(code)) result.warnings.push(code);
++  };
++  const runs: Run[] = [];
++  for (const item of items) {
++    if (!item.str.trim()) continue;
++    const [a, b, c, d, x, y] = item.transform;
++    if (item.transform.length < 6 || ![a, b, c, d, x, y, item.width].every(Number.isFinite)) {
++      warn('invalid-text-item');
++      continue;
++    }
++    // height can be a glyph bounding box and is especially unreliable for italics.
++    const size = Math.hypot(c!, d!);
++    if (size <= 0) {
++      warn('invalid-text-item');
++      continue;
++    }
++    const rotated = Math.abs(Math.atan2(b!, a!)) > 0.12 || item.dir === 'ttb';
++    if (rotated) warn('rotated-text');
++    runs.push({
++      text: item.str.replace(/\s+/gu, ' '),
++      x: x!,
++      y: y!,
++      size,
++      width: Math.abs(item.width),
++      rotated,
++    });
++  }
++  if (!runs.length) {
++    warn('empty-text');
++    return result;
++  }
++
++  // Seed lines with large glyphs first so a superscript cannot pull the body
++  // baseline upward. Font-scaled tolerance avoids fixed-point assumptions.
++  const lines: Line[] = [];
++  for (const run of [...runs].sort((a, b) => b.size - a.size || b.y - a.y || a.x - b.x)) {
++    let best: Line | undefined;
++    let bestDistance = Infinity;
++    for (const line of lines) {
++      if (run.rotated || line.runs[0]!.rotated) continue;
++      const distance = Math.abs(run.y - line.y);
++      const small = run.size < line.size * 0.8;
++      const tolerance = line.size * (small ? 0.65 : 0.28);
++      // Small raised/lowered glyphs must also be horizontally near this line.
++      const horizontalGap = Math.max(line.x - (run.x + run.width), run.x - line.end, 0);
++      if (
++        distance <= tolerance &&
++        (!small || distance <= line.size * 0.28 || horizontalGap <= line.size * 1.5) &&
++        distance < bestDistance
++      ) {
++        best = line;
++        bestDistance = distance;
++      }
++    }
++    if (best) {
++      best.runs.push(run);
++      best.x = Math.min(best.x, run.x);
++      best.end = Math.max(best.end, run.x + run.width);
++    } else {
++      lines.push({
++        runs: [run],
++        y: run.y,
++        size: run.size,
++        x: run.x,
++        end: run.x + run.width,
++        text: '',
++      });
++    }
++  }
++  lines.sort((a, b) => b.y - a.y || a.x - b.x);
++  let wideGapRows = 0;
++  for (const line of lines) {
++    line.runs.sort((a, b) => a.x - b.x);
++    line.size = textSize(line.runs);
++    let previous: Run | undefined;
++    let wideGap = false;
++    for (const run of line.runs) {
++      const gap = previous ? run.x - (previous.x + previous.width) : 0;
++      if (
++        previous &&
++        pageWidth > 0 &&
++        gap > Math.max(pageWidth * 0.12, line.size * 4) &&
++        previous.x + previous.width < pageWidth * 0.65 &&
++        run.x > pageWidth * 0.35
++      )
++        wideGap = true;
++      const explicitSpace = !!previous && (/\s$/.test(previous.text) || /^\s/.test(run.text));
++      const superscript =
++        !!previous &&
++        Math.min(previous.size, run.size) < Math.max(previous.size, run.size) * 0.8 &&
++        Math.abs(previous.y - run.y) > line.size * 0.15;
++      line.text = joinText(
++        line.text,
++        run.text,
++        !superscript && (explicitSpace || gap > line.size * 0.12),
++      );
++      previous = run;
++    }
++    if (wideGap) wideGapRows++;
++  }
++  const columns = wideGapRows >= 2;
++  if (columns) warn('possible-multiple-columns');
++
++  const kept = lines.filter((line, index) => {
++    if (!(pageHeight > 0) || !/^\d+$/.test(line.text)) return true;
++    // Four-digit years are deliberately preserved, including in page margins.
++    const number = Number(line.text);
++    if (number >= 1000 && number <= 2999) return true;
++    if (line.y > pageHeight * 0.075 && line.y < pageHeight * 0.925) return true;
++    const neighbors = [lines[index - 1], lines[index + 1]].filter((v): v is Line => !!v);
++    const isolated = neighbors.every(
++      (other) => Math.abs(other.y - line.y) > Math.max(line.size, other.size) * 1.5,
++    );
++    if (!isolated || line.runs.some((run) => run.rotated)) return true;
++    result.removedPageNumbers.push(line.text);
++    return false;
++  });
++  if (!kept.length) return result;
++  const bodySize = textSize(kept.flatMap((line) => line.runs));
++  const bodyLines = kept.filter(
++    (line) => line.size >= bodySize * 0.85 && line.size <= bodySize * 1.15,
++  );
++  const gaps = bodyLines
++    .slice(1)
++    .map((line, i) => bodyLines[i]!.y - line.y)
++    .filter((gap) => gap > bodySize * 0.6 && gap < bodySize * 2.1);
++  const leading = median(gaps) || bodySize * 1.3;
++  const leftMargin = Math.min(...kept.map((line) => line.x));
++  let previous: Line | undefined;
++  for (const line of kept) {
++    const kind: ReflowBlock['kind'] = line.size < bodySize * 0.85 ? 'note' : 'paragraph';
++    const last = result.blocks[result.blocks.length - 1];
++    const gap = previous ? previous.y - line.y : Infinity;
++    const sizeChange =
++      previous && Math.max(previous.size, line.size) / Math.min(previous.size, line.size) > 1.18;
++    const indented =
++      previous &&
++      line.x - leftMargin > line.size * 1.2 &&
++      previous.x - leftMargin <= line.size * 0.7;
++    const rotated =
++      line.runs.some((run) => run.rotated) || previous?.runs.some((run) => run.rotated);
++    const limit = kind === 'note' ? line.size * 1.8 : Math.max(leading * 1.45, bodySize * 1.65);
++    if (
++      !last ||
++      last.kind !== kind ||
++      gap > limit ||
++      sizeChange ||
++      indented ||
++      columns ||
++      rotated
++    ) {
++      result.blocks.push({ kind, text: line.text });
++    } else {
++      last.text = joinText(last.text, line.text, true, true);
++    }
++    previous = line;
++  }
++  return result;
++}
+diff --git a/docs/pdf-reflow.md b/docs/pdf-reflow.md
+new file mode 100644
+index 0000000..b7b55d8
+--- /dev/null
++++ b/docs/pdf-reflow.md
+@@ -0,0 +1,41 @@
++# PDF 文字重排（单栏文字版）
++
++## 入口与使用
++
++打开 PDF → 点正文唤出阅读工具栏 → 顶栏「查看选项」菜单 →「PDF 文字重排」。
++
++- 当前原文件页码进入，竖向滚动读本页；上一页、下一页或输入原文件页码跳转。
++- 字号 16–36px、三档行距；使用当前应用主题。
++- 「返回对应原页」、关闭按钮或系统返回均尝试导航回当前重排页对应的原 PDF 页面。
++- 原文件页码含封面；示例书 PDF 第17页对应印刷第16页。
++- 本轮不连续拼接跨页段落、不生成新书、不修改 PDF，不映射重排文字上的笔记，不接入听书；仍可在原版使用已有功能。
++- 本轮字号、行距及缓存为打开面板期间有效；关闭后以原版进度为准，不承诺持久化重排滚动位置。
++
++## 范围
++
++适用：有正常文字层的单栏横排 PDF，正文和独立小字注释。
++不支持：OCR、复杂双栏结构还原、公式/表格/图片重建、AI 纠错或改写。
++顶部持续提示局限，空页和旋转页明确回退原版。页眉/页脚仅保守去除孤立边缘数字页码，不笼统删除重复文字。
++可能多栏的检测只是启发式，不能发现所有复杂布局。文字层缺字、编码问题或 PDF 绘制成图像的文字无法靠此功能补回。
++
++## 实现
++
++- `foliate-js/pdf.js` 的 section 添加 `getReflowText`，复用已打开的 PDF worker，不另开整本文档、不渲染 canvas。
++- 坐标从 crop-box 原点归一化；重排函数依据基线与横向位置合并文字、小上标、斜体及中英文换行。
++- 通过独立原页间距/字体判断段落及小字注释，React 以纯文本渲染，PDF 内容不作为 HTML 执行。
++- 每次只提取所选原页，内存最多缓存12页，异步请求失效保护避免快速翻页显示旧内容。
++- 单独的阅读面板不更改原书 CFI、format 或底层 fixed-layout renderer；返回原版用官方 view.goTo(index)，并确认 primaryIndex。
++- `reading-polish.patch` 包含应用全部修改；`foliate-reflow.patch` 必须在锁定的 foliate-js 子模块内另行应用。云端 workflow 已接入，两者缺一不可。
++
++## 本地验证
++
++- 7个相关测试文件56项通过（段落函数18、面板6、PDF接口1、既有页码/范围读取/顶栏/弹层回归）。
++- 全项目 TypeScript 5.9 检查通过；修改文件 Biome 检查。
++- 用户第一本307页样本用真实 PDF.js 全书提取。忽略空白、软连字符，并计回被移除的页码后，输入/输出字符多重集一致。此检查不证明顺序、段落或原 PDF 字符提取完全正确。
++- 第1页无文字；另6页触发可能多栏警告（物理128/182/225/226/240/280页），其余页无该警告不代表全部已人工验收。
++- 对物理16/17页抽查：斜体英文题名与正文位置恢复；印刷16页脚注保留为小字，页码单独去除。
++- 不在公开仓库上传用户PDF、提取全文或截图。
++
++## 尚需真机验证
++
++APK产出后需检验：首次打开、Android返回键、长页滚动、连续快速切页、输入页码、返回对应原页、横屏安全区、主题和电纸书。单元测试和样本检查不等于原生设备验收。
 diff --git a/docs/reading-polish.md b/docs/reading-polish.md
 new file mode 100644
 index 0000000..0f03691

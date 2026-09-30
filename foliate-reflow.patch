@@ -1,0 +1,31 @@
+diff --git a/pdf.js b/pdf.js
+index c389f98..2c74b20 100644
+--- a/pdf.js
++++ b/pdf.js
+@@ -717,6 +717,26 @@ export const makePDF = async file => {
+     }
+     book.sections = Array.from({ length: pdf.numPages }).map((_, i) => ({
+         id: i,
++        // Read-only text reflow uses the already-open document/worker. Do not
++        // render a canvas or alter the fixed-layout reader's navigation state.
++        getReflowText: async () => {
++            const page = await getPage(i)
++            const content = await page.getTextContent()
++            const [x1, y1, x2, y2] = page.view
++            return {
++                items: content.items.filter(item => typeof item.str === 'string').map(item => ({
++                    str: item.str,
++                    width: item.width,
++                    height: item.height,
++                    transform: [...item.transform.slice(0, 4), item.transform[4] - x1, item.transform[5] - y1],
++                    hasEOL: item.hasEOL,
++                    dir: item.dir,
++                })),
++                width: x2 - x1,
++                height: y2 - y1,
++                rotation: page.rotate,
++            }
++        },
+         load: async () => {
+             const cached = cache.get(i)
+             if (cached) {

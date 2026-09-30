@@ -6,6 +6,7 @@ Personal Android UI preview of [Readest](https://github.com/readest/readest), no
 
 - Upstream commit: `6e567ef3106a9bf6e6daa697760db66cc30b4b8a` (Readest 0.12.10).
 - `reading-polish.patch` contains every UI modification, tests, and detailed validation notes.
+- `foliate-reflow.patch` adds a read-only PDF text extraction API to the pinned foliate-js submodule; the workflow applies it after initializing submodules.
 - `prepare_preview.py` contains all Android packaging changes.
 - The workflow checks out that exact commit, applies the patch and builds an ARM64 APK.
 - Source and modifications remain under AGPL-3.0; see LICENSE and upstream notices.
@@ -22,6 +23,12 @@ Actions → **Build Readest Preview APK** → Run workflow. Download artifact **
 Signing requires repository Secrets `PREVIEW_KEYSTORE` (base64 JKS) and `PREVIEW_KEY_PASSWORD`, alias `preview`. They are private and never part of this repository. Keep the same signing key to update this preview without reinstalling.
 
 The workflow uses standard public GitHub-hosted runners, not paid larger runners. No scheduled, push or PR builds are enabled.
+
+## PDF text reflow (new)
+
+Open a PDF → show reader toolbar → View Options → PDF Text Reflow. This is a local, page-based reading mode for upright single-column PDFs with text layers. It supports adjustable font size/line spacing, small notes, original physical page navigation, and return to the original view. It does not do OCR, reconstruct images/formulas/tables, create synthetic annotations, or convert the entire PDF into a new book. Font settings/cache currently last for the open panel only. Full details and test boundaries are in the patched `docs/pdf-reflow.md`.
+
+The user's sample PDFs and extracted text are never published here. The existing preview signing key is reused for in-place preview updates.
 
 ## Scope
 
