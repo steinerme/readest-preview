@@ -1,8 +1,8 @@
 diff --git a/apps/readest-app/public/locales/zh-CN/translation.json b/apps/readest-app/public/locales/zh-CN/translation.json
-index 59cd398..450c22e 100644
+index 59cd398..079026b 100644
 --- a/apps/readest-app/public/locales/zh-CN/translation.json
 +++ b/apps/readest-app/public/locales/zh-CN/translation.json
-@@ -2411,5 +2411,22 @@
+@@ -2411,5 +2411,25 @@
    "Sentence around the highlight": "高亮所在的句子",
    "Do not speak readings or Hanja glosses in parentheses after a word": "不朗读词语后括号内的读音或汉字注释",
    "Visible as {{name}}": "显示为 {{name}}",
@@ -24,7 +24,10 @@ index 59cd398..450c22e 100644
 +  "Show Reflow Controls": "显示阅读工具栏",
 +  "Hide Reflow Controls": "隐藏阅读工具栏",
 +  "Go": "跳转",
-+  "Page Navigation": "翻页导航"
++  "Page Navigation": "翻页导航",
++  "Switch to Reflow": "切换为重排",
++  "Switch to PDF": "切换为 PDF",
++  "Return to Current Speech": "回到正在朗读"
  }
 diff --git a/apps/readest-app/src/__tests__/components/Dialog.test.tsx b/apps/readest-app/src/__tests__/components/Dialog.test.tsx
 new file mode 100644
@@ -216,10 +219,10 @@ index f87ff3c..74afc29 100644
  describe('HeaderBar sidebar toggle', () => {
 diff --git a/apps/readest-app/src/__tests__/components/PdfReflowDialog.test.tsx b/apps/readest-app/src/__tests__/components/PdfReflowDialog.test.tsx
 new file mode 100644
-index 0000000..92b20a1
+index 0000000..4691c7f
 --- /dev/null
 +++ b/apps/readest-app/src/__tests__/components/PdfReflowDialog.test.tsx
-@@ -0,0 +1,265 @@
+@@ -0,0 +1,327 @@
 +import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 +import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 +import PdfReflowDialog from '@/app/reader/components/PdfReflowDialog';
@@ -313,7 +316,7 @@ index 0000000..92b20a1
 +    expect(mocks.pages[0]!.getReflowText).toHaveBeenCalledTimes(1);
 +    fireEvent.click(screen.getAllByText('Next Page')[0]!);
 +    await screen.findByText('第二页正文。');
-+    fireEvent.click(screen.getByText('Back to Original Page'));
++    fireEvent.click(screen.getByText('Switch to PDF'));
 +    await waitFor(() => expect(close).toHaveBeenCalledOnce());
 +    expect(mocks.goTo).toHaveBeenCalledWith(1);
 +  });
@@ -361,7 +364,7 @@ index 0000000..92b20a1
 +    render(<PdfReflowDialog bookKey='pdf-1' onClose={close} />);
 +    await screen.findByText('第一页正文。');
 +    fireEvent.click(screen.getByLabelText('Show Reflow Controls'));
-+    fireEvent.click(screen.getByText('Back to Original Page'));
++    fireEvent.click(screen.getByText('Switch to PDF'));
 +    expect(close).toHaveBeenCalledOnce();
 +  });
 +
@@ -441,7 +444,7 @@ index 0000000..92b20a1
 +    render(<PdfReflowDialog bookKey='pdf-1' onClose={close} />);
 +    await screen.findByText('第一页正文。');
 +    fireEvent.click(screen.getByLabelText('Show Reflow Controls'));
-+    fireEvent.click(screen.getByText('Back to Original Page'));
++    fireEvent.click(screen.getByText('Switch to PDF'));
 +    expect(close).toHaveBeenCalledOnce();
 +    await waitFor(() => expect(toast).toHaveBeenCalledOnce());
 +    eventDispatcher.off('toast', toast);
@@ -483,6 +486,68 @@ index 0000000..92b20a1
 +    fireEvent.keyDown(window, { key: 'Escape' });
 +    expect(close).not.toHaveBeenCalled();
 +    expect(mocks.release).toHaveBeenCalled();
++  });
++});
++
++describe('PDF reflow audio integration', () => {
++  const rangeFor = (text: string) => {
++    const doc = document.implementation.createHTMLDocument('');
++    doc.body.innerHTML = '<div class="textLayer"><span></span></div>';
++    doc.querySelector('span')!.textContent = text;
++    const range = doc.createRange();
++    range.selectNodeContents(doc.querySelector('span')!);
++    return range;
++  };
++  it('manual entry overrides saved page including explicit page zero, retaining font preferences', async () => {
++    sessionStorage.setItem(
++      'pdf-reflow:pdf-1',
++      JSON.stringify({ page: 1, fontSize: 30, lineHeight: 2.2 }),
++    );
++    // Save via the public component contract rather than relying on session key format.
++    const first = render(<PdfReflowDialog bookKey='pdf-1' initialPage={1} onClose={vi.fn()} />);
++    await screen.findByText('第二页正文。');
++    first.unmount();
++    render(<PdfReflowDialog bookKey='pdf-1' initialPage={0} onClose={vi.fn()} />);
++    await screen.findByText('第一页正文。');
++    expect(screen.queryByText('第二页正文。')).toBeNull();
++  });
++  it('keeps audio controls reachable with chrome hidden and displays real markers across pages', async () => {
++    const { container } = render(<PdfReflowDialog bookKey='pdf-1' onClose={vi.fn()} />);
++    await screen.findByText('第一页正文。');
++    expect(container.querySelector('header')!.hasAttribute('inert')).toBe(true);
++    expect(screen.getByRole('button', { name: 'Read Aloud' })).toBeTruthy();
++    await act(async () => {
++      await eventDispatcher.dispatch('tts-playback-state', { bookKey: 'pdf-1', state: 'playing' });
++      await eventDispatcher.dispatch('tts-position', {
++        bookKey: 'pdf-1',
++        sectionIndex: 0,
++        sequence: 1,
++        kind: 'sentence',
++        range: rangeFor('第一页正文。'),
++      });
++    });
++    expect(container.querySelector('mark')!.textContent).toBe('第一页正文。');
++    expect(screen.getByRole('button', { name: 'Pause' })).toBeTruthy();
++    fireEvent.wheel(container.querySelector('article')!);
++    expect(screen.getByRole('button', { name: 'Return to Current Speech' })).toBeTruthy();
++    await act(async () => {
++      await eventDispatcher.dispatch('tts-position', {
++        bookKey: 'pdf-1',
++        sectionIndex: 1,
++        sequence: 2,
++        kind: 'sentence',
++        range: rangeFor('第二页正文。'),
++      });
++    });
++    expect(screen.queryByText('第二页正文。')).toBeNull();
++    fireEvent.click(screen.getByRole('button', { name: 'Return to Current Speech' }));
++    await waitFor(() => expect(container.querySelector('mark')!.textContent).toBe('第二页正文。'));
++    fireEvent.click(screen.getByLabelText('Show Reflow Controls'));
++    const stopped = vi.fn();
++    eventDispatcher.on('tts-stop', stopped);
++    fireEvent.click(screen.getByText('Switch to PDF'));
++    expect(stopped).not.toHaveBeenCalled();
++    eventDispatcher.off('tts-stop', stopped);
 +  });
 +});
 diff --git a/apps/readest-app/src/__tests__/components/ReadingPanels.test.tsx b/apps/readest-app/src/__tests__/components/ReadingPanels.test.tsx
@@ -577,6 +642,221 @@ index 0000000..512b45b
 +    expect(panel.getAttribute('aria-hidden')).toBe('false');
 +  });
 +});
+diff --git a/apps/readest-app/src/__tests__/components/pdf-default-reflow.test.tsx b/apps/readest-app/src/__tests__/components/pdf-default-reflow.test.tsx
+new file mode 100644
+index 0000000..79484de
+--- /dev/null
++++ b/apps/readest-app/src/__tests__/components/pdf-default-reflow.test.tsx
+@@ -0,0 +1,146 @@
++import { cleanup, fireEvent, render, screen } from '@testing-library/react';
++import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
++import HeaderBar from '@/app/reader/components/HeaderBar';
++
++let ready = false;
++let format = 'PDF';
++let page = 4;
++let loaded = true;
++const view = {
++  renderer: {
++    getContents: () => [],
++    get primaryIndex() {
++      return page;
++    },
++  },
++};
++vi.mock('@/hooks/useTranslation', () => ({ useTranslation: () => (s: string) => s }));
++vi.mock('@/context/EnvContext', () => ({
++  useEnv: () => ({ envConfig: {}, appService: { isMobile: true } }),
++}));
++vi.mock('@/store/settingsStore', () => ({
++  useSettingsStore: () => ({
++    settings: { globalReadSettings: { highlightStyle: 'highlight', highlightStyles: {} } },
++  }),
++}));
++vi.mock('@/store/themeStore', () => ({
++  useThemeStore: () => ({ isDarkMode: false, systemUIVisible: true, statusBarHeight: 0 }),
++}));
++vi.mock('@/store/sidebarStore', () => ({
++  useSidebarStore: () => ({ isSideBarVisible: false, getIsSideBarVisible: () => false }),
++}));
++vi.mock('@/store/readerStore', () => ({
++  useReaderStore: (selector?: (s: unknown) => unknown) => {
++    const state = {
++      viewStates: { 'book-1': { inited: ready } },
++      bookKeys: ['book-1'],
++      hoveredBookKey: 'book-1',
++      getView: () => view,
++      getViewSettings: () => ({ enableAnnotationQuickActions: false }),
++      setHoveredBookKey: vi.fn(),
++    };
++    return selector ? selector(state) : state;
++  },
++}));
++vi.mock('@/store/bookDataStore', () => ({
++  useBookDataStore: () => ({
++    getBookData: () => ({ book: { format }, bookDoc: loaded ? { sections: [1, 2, 3] } : null }),
++    getConfig: () => null,
++  }),
++}));
++vi.mock('@/store/trafficLightStore', () => ({
++  useTrafficLightStore: () => ({
++    trafficLightInFullscreen: false,
++    setTrafficLightVisibility: vi.fn(),
++  }),
++}));
++vi.mock('@/hooks/useTrafficLight', () => ({
++  useTrafficLight: () => ({ isTrafficLightVisible: false }),
++}));
++vi.mock('@/hooks/useResponsiveSize', () => ({ useResponsiveSize: (n: number) => n }));
++vi.mock('@/app/reader/hooks/useSpatialNavigation', () => ({ useSpatialNavigation: () => {} }));
++vi.mock('@/utils/insets', () => ({ getHeaderTriggerHeight: () => 0 }));
++vi.mock('@/helpers/settings', () => ({ saveViewSettings: vi.fn() }));
++vi.mock('@/app/reader/components/SidebarToggler', () => ({ default: () => null }));
++vi.mock('@/app/reader/components/BookmarkToggler', () => ({ default: () => null }));
++vi.mock('@/app/reader/components/NotebookToggler', () => ({ default: () => null }));
++vi.mock('@/app/reader/components/TranslationToggler', () => ({ default: () => null }));
++vi.mock('@/app/reader/components/ViewMenu', () => ({ default: () => null }));
++vi.mock('@/app/reader/components/SyncInfoDialog', () => ({ default: () => null }));
++vi.mock('@/components/WindowButtons', () => ({ default: () => null }));
++vi.mock('@/components/Dropdown', () => ({ default: () => null }));
++vi.mock('@/components/ModalPortal', () => ({
++  default: ({ children }: { children: import('react').ReactNode }) => <>{children}</>,
++}));
++vi.mock('@/app/reader/components/PdfReflowDialog', () => ({
++  default: ({ initialPage, onClose }: { initialPage?: number; onClose: () => void }) => (
++    <div data-testid='reflow' data-page={initialPage ?? 'saved'}>
++      <button onClick={onClose}>Switch to PDF</button>
++    </div>
++  ),
++}));
++const props = {
++  bookKey: 'book-1',
++  bookTitle: 'PDF',
++  isTopLeft: true,
++  isHoveredAnim: false,
++  gridInsets: { top: 0, right: 0, bottom: 0, left: 0 },
++  screenInsets: { top: 0, right: 0, bottom: 0, left: 0 },
++  onCloseBook: vi.fn(),
++  onGoToLibrary: vi.fn(),
++};
++beforeEach(() => {
++  ready = false;
++  format = 'PDF';
++  loaded = true;
++  page = 4;
++  vi.stubGlobal(
++    'ResizeObserver',
++    class {
++      observe() {}
++      disconnect() {}
++    },
++  );
++});
++afterEach(() => {
++  cleanup();
++  vi.unstubAllGlobals();
++});
++describe('PDF default reflow', () => {
++  it('waits for restored original view and document before default opening', () => {
++    const r = render(<HeaderBar {...props} />);
++    expect(screen.queryByTestId('reflow')).toBeNull();
++    ready = true;
++    loaded = false;
++    r.rerender(<HeaderBar {...props} />);
++    expect(screen.queryByTestId('reflow')).toBeNull();
++    loaded = true;
++    r.rerender(<HeaderBar {...props} />);
++    expect(screen.getByTestId('reflow').getAttribute('data-page')).toBe('saved');
++  });
++  it('does not reopen after choosing original, but direct toolbar switch uses current original page', () => {
++    ready = true;
++    const r = render(<HeaderBar {...props} />);
++    fireEvent.click(screen.getByText('Switch to PDF'));
++    r.rerender(<HeaderBar {...props} />);
++    expect(screen.queryByTestId('reflow')).toBeNull();
++    page = 0;
++    fireEvent.click(screen.getByRole('button', { name: 'Switch to Reflow' }));
++    expect(screen.getByTestId('reflow').getAttribute('data-page')).toBe('0');
++  });
++  it('does not change EPUB startup or show a PDF toggle', () => {
++    ready = true;
++    format = 'EPUB';
++    render(<HeaderBar {...props} />);
++    expect(screen.queryByTestId('reflow')).toBeNull();
++    expect(screen.queryByRole('button', { name: 'Switch to Reflow' })).toBeNull();
++  });
++  it('defaults to reflow on a fresh reader mount', () => {
++    ready = true;
++    const r = render(<HeaderBar {...props} />);
++    fireEvent.click(screen.getByText('Switch to PDF'));
++    r.unmount();
++    render(<HeaderBar {...props} />);
++    expect(screen.getByTestId('reflow')).toBeTruthy();
++  });
++});
+diff --git a/apps/readest-app/src/__tests__/document/pdf-reflow-speech.test.ts b/apps/readest-app/src/__tests__/document/pdf-reflow-speech.test.ts
+new file mode 100644
+index 0000000..d04dc15
+--- /dev/null
++++ b/apps/readest-app/src/__tests__/document/pdf-reflow-speech.test.ts
+@@ -0,0 +1,57 @@
++import { beforeAll, describe, expect, it } from 'vitest';
++import { readFileSync } from 'node:fs';
++import { join, resolve } from 'node:path';
++import { DocumentLoader, type BookDoc } from '@/libs/document';
++import { reflowPdfText, normalizePdfSpeechText } from '@/utils/pdfReflow';
++import { mapPdfSpeechRange } from '@/utils/pdfReflowTTS';
++import { TTS } from 'foliate-js/tts.js';
++import { textWalker } from 'foliate-js/text-walker.js';
++
++let book: BookDoc;
++beforeAll(async () => {
++  await import('@pdfjs/pdf.min.mjs');
++  const lib = (
++    globalThis as unknown as { pdfjsLib: { GlobalWorkerOptions: { workerSrc: string } } }
++  ).pdfjsLib;
++  lib.GlobalWorkerOptions.workerSrc = new URL(
++    `file://${join(process.cwd(), 'public/vendor/pdfjs/pdf.worker.min.mjs')}`,
++  ).href;
++  const file = new File(
++    [readFileSync(resolve(__dirname, '../fixtures/data/sample-alice.pdf'))],
++    'sample.pdf',
++    { type: 'application/pdf' },
++  );
++  book = (await new DocumentLoader(file).open()).book;
++}, 30000);
++
++describe('real PDF reflow speech provenance', () => {
++  it('maps actual PDF text-layer ranges on three pages without repeated-text search', async () => {
++    for (let page = 0; page < Math.min(3, book.sections.length); page++) {
++      const section = book.sections[page]!;
++      const data = await section.getReflowText!();
++      const reflow = reflowPdfText(data.items, data.width, data.height, true);
++      const doc = await section.createDocument();
++      const layer = doc.querySelector('.textLayer')!;
++      expect(normalizePdfSpeechText(layer.textContent ?? '')).toBe(reflow.sourceText);
++      const range = doc.createRange();
++      range.selectNodeContents(layer);
++      const marks = mapPdfSpeechRange(reflow, range);
++      expect(marks.length).toBeGreaterThan(0);
++      const marked = marks.map((m) => reflow.blocks[m.block]!.text.slice(m.start, m.end)).join('');
++      expect(normalizePdfSpeechText(marked)).toBe(
++        normalizePdfSpeechText(reflow.blocks.map((b) => b.text).join('')),
++      );
++    }
++  });
++  it('maps real foliate sentence marks into displayed reflow paragraphs', async () => {
++    const section = book.sections[0]!;
++    const data = await section.getReflowText!();
++    const reflow = reflowPdfText(data.items, data.width, data.height, true);
++    const doc = await section.createDocument();
++    const tts = new TTS(doc, textWalker, undefined, () => {}, 'sentence');
++    expect(tts.start()).toBeTruthy();
++    const range = tts.setMark('0');
++    expect(range).toBeTruthy();
++    expect(mapPdfSpeechRange(reflow, range!).length).toBeGreaterThan(0);
++  });
++});
 diff --git a/apps/readest-app/src/__tests__/foliate-pdf-reflow.test.ts b/apps/readest-app/src/__tests__/foliate-pdf-reflow.test.ts
 new file mode 100644
 index 0000000..52535d5
@@ -658,6 +938,347 @@ index 0000000..52535d5
 +    expect(JSON.stringify(mocks.items)).toBe(before);
 +    book.destroy();
 +    expect(mocks.destroy).toHaveBeenCalledOnce();
++  });
++});
+diff --git a/apps/readest-app/src/__tests__/hooks/usePdfReflowTTS.test.tsx b/apps/readest-app/src/__tests__/hooks/usePdfReflowTTS.test.tsx
+new file mode 100644
+index 0000000..ec81eb5
+--- /dev/null
++++ b/apps/readest-app/src/__tests__/hooks/usePdfReflowTTS.test.tsx
+@@ -0,0 +1,181 @@
++import { act, cleanup, renderHook } from '@testing-library/react';
++import { afterEach, describe, expect, it, vi } from 'vitest';
++import { usePdfReflowTTS } from '@/app/reader/hooks/usePdfReflowTTS';
++import { reflowPdfText } from '@/utils/pdfReflow';
++import { eventDispatcher } from '@/utils/event';
++
++const unsubscribers: Array<() => void> = [];
++afterEach(() => {
++  cleanup();
++  unsubscribers.splice(0).forEach((off) => off());
++});
++function listen(name: string, callback = vi.fn()) {
++  eventDispatcher.on(name, callback);
++  unsubscribers.push(() => eventDispatcher.off(name, callback));
++  return callback;
++}
++function harness() {
++  const setPage = vi.fn();
++  const scrollIntoView = vi.fn();
++  const scrollRef = {
++    current: { querySelector: vi.fn(() => ({ scrollIntoView })) } as unknown as HTMLElement,
++  };
++  const page = reflowPdfText(
++    [{ str: 'Real sentence.', transform: [14, 0, 0, 14, 50, 700], width: 160, height: 14 }],
++    612,
++    792,
++    true,
++  );
++  const doc = document.implementation.createHTMLDocument('');
++  doc.body.innerHTML = '<div class="textLayer"><span>Real sentence.</span></div>';
++  const range = doc.createRange();
++  range.selectNodeContents(doc.querySelector('span')!);
++  const props = { bookKey: 'pdf-1', page: 0, count: 3, result: page, setPage, scrollRef };
++  const hook = renderHook((p) => usePdfReflowTTS(p), { initialProps: props });
++  return { ...hook, props, range, setPage, scrollIntoView };
++}
++async function position(sectionIndex: number, sequence: number, range?: Range, bookKey = 'pdf-1') {
++  await act(async () => {
++    await eventDispatcher.dispatch('tts-position', {
++      bookKey,
++      sectionIndex,
++      sequence,
++      range,
++      kind: 'sentence',
++    });
++  });
++}
++async function state(state: string, bookKey = 'pdf-1') {
++  await act(async () => {
++    await eventDispatcher.dispatch('tts-playback-state', { bookKey, state });
++  });
++}
++
++describe('PDF reflow TTS follower', () => {
++  it('requests immediate replay on entry and follows real ranges even when page zero', async () => {
++    const sync = listen('tts-sync-request');
++    const h = harness();
++    expect(sync).toHaveBeenCalledWith(expect.objectContaining({ detail: { bookKey: 'pdf-1' } }));
++    await position(0, 1, h.range);
++    expect(h.result.current.highlights).toEqual([{ block: 0, start: 0, end: 14 }]);
++    expect(h.scrollIntoView).toHaveBeenCalledWith(expect.objectContaining({ block: 'nearest' }));
++  });
++  it('starts at the current physical page and serializes rapid transport taps', async () => {
++    let release!: () => void;
++    const speak = listen(
++      'tts-speak',
++      vi.fn(
++        () =>
++          new Promise<void>((resolve) => {
++            release = resolve;
++          }),
++      ),
++    );
++    const h = harness();
++    let first!: Promise<void>;
++    act(() => {
++      first = h.result.current.toggle();
++      void h.result.current.toggle();
++    });
++    expect(h.result.current.pending).toBe(true);
++    expect(speak).toHaveBeenCalledTimes(1);
++    expect(speak).toHaveBeenCalledWith(
++      expect.objectContaining({ detail: { bookKey: 'pdf-1', index: 0 } }),
++    );
++    await act(async () => {
++      release();
++      await first;
++    });
++    expect(h.result.current.pending).toBe(false);
++  });
++  it('pauses/resumes through the existing transport and stops via the existing manager path', async () => {
++    const toggle = listen('tts-toggle-play');
++    const stop = listen('tts-stop');
++    const speak = listen('tts-speak');
++    const h = harness();
++    await state('playing');
++    await act(async () => {
++      await h.result.current.toggle();
++    });
++    await state('paused');
++    expect(h.result.current.state).toBe('paused');
++    await act(async () => {
++      await h.result.current.toggle();
++    });
++    expect(toggle).toHaveBeenCalledTimes(2);
++    expect(speak).not.toHaveBeenCalled();
++    act(() => h.result.current.stop());
++    expect(stop).toHaveBeenCalledWith(expect.objectContaining({ detail: { bookKey: 'pdf-1' } }));
++    expect(h.result.current.state).toBe('stopped');
++    expect(h.result.current.highlights).toEqual([]);
++  });
++  it('follows physical sections, ignores stale/out-of-order events and other book keys', async () => {
++    const h = harness();
++    await position(1, 10, h.range);
++    expect(h.setPage).toHaveBeenLastCalledWith(1);
++    await position(2, 9, h.range);
++    await position(2, 11, h.range, 'pdf-other');
++    await position(-1, 12, h.range);
++    await position(3, 13, h.range);
++    expect(h.setPage).toHaveBeenCalledTimes(1);
++    await position(2, 14, h.range);
++    expect(h.setPage).toHaveBeenLastCalledWith(2);
++  });
++  it('manual navigation/scrolling suspends following without pausing audio, return resumes latest location', async () => {
++    const toggle = listen('tts-toggle-play');
++    const h = harness();
++    await state('playing');
++    await position(0, 1, h.range);
++    h.scrollIntoView.mockClear();
++    act(() => h.result.current.suspendFollowing());
++    await position(1, 2, h.range);
++    expect(h.result.current.following).toBe(false);
++    expect(h.setPage).not.toHaveBeenCalled();
++    expect(h.scrollIntoView).not.toHaveBeenCalled();
++    expect(toggle).not.toHaveBeenCalled();
++    act(() => h.result.current.returnToSpeech());
++    expect(h.setPage).toHaveBeenLastCalledWith(1);
++    h.rerender({ ...h.props, page: 1 });
++    expect(h.result.current.following).toBe(true);
++    expect(h.scrollIntoView).toHaveBeenCalled();
++  });
++  it('does not invent highlight for missing Range/mismatched document or wrong displayed page', async () => {
++    const h = harness();
++    await position(0, 1);
++    expect(h.result.current.highlights).toEqual([]);
++    await position(1, 2, h.range);
++    expect(h.result.current.highlights).toEqual([]);
++    h.rerender({ ...h.props, page: 1, result: { ...h.props.result, sourceText: 'different' } });
++    expect(h.result.current.highlights).toEqual([]);
++  });
++  it('ignores unrelated playback states and clears markers on actual terminal stop', async () => {
++    const h = harness();
++    await state('playing');
++    await state('paused', 'other-book');
++    expect(h.result.current.state).toBe('playing');
++    await position(0, 1, h.range);
++    await state('stopped');
++    expect(h.result.current.highlights).toEqual([]);
++    expect(h.result.current.state).toBe('stopped');
++  });
++  it('removes listeners on switch to PDF/unmount without stopping audio or late updates', async () => {
++    const stop = listen('tts-stop');
++    const h = harness();
++    h.unmount();
++    await position(1, 1, h.range);
++    await state('playing');
++    expect(h.setPage).not.toHaveBeenCalled();
++    expect(stop).not.toHaveBeenCalled();
++  });
++  it('cleans old-book listeners and resets pending requests on bookKey change', async () => {
++    const h = harness();
++    await state('playing');
++    h.rerender({ ...h.props, bookKey: 'pdf-2' });
++    await position(1, 1, h.range);
++    await state('playing');
++    expect(h.setPage).not.toHaveBeenCalled();
++    expect(h.result.current.state).toBe('stopped');
++    await position(2, 2, h.range, 'pdf-2');
++    expect(h.setPage).toHaveBeenCalledWith(2);
++  });
++});
+diff --git a/apps/readest-app/src/__tests__/hooks/useTTSControl.test.tsx b/apps/readest-app/src/__tests__/hooks/useTTSControl.test.tsx
+index 0ec1919..389d90f 100644
+--- a/apps/readest-app/src/__tests__/hooks/useTTSControl.test.tsx
++++ b/apps/readest-app/src/__tests__/hooks/useTTSControl.test.tsx
+@@ -265,7 +265,7 @@ vi.mock('@/utils/throttle', () => ({
+ }));
+ 
+ vi.mock('@/utils/cfi', () => ({
+-  isCfiInLocation: () => false,
++  isCfiInLocation: vi.fn(() => false),
+ }));
+ 
+ vi.mock('@/utils/misc', () => ({
+@@ -297,6 +297,8 @@ vi.mock('@/utils/ttsTime', () => ({
+ 
+ // Imports must come AFTER vi.mock calls so they pick up the mocked modules.
+ import { useTTSControl } from '@/app/reader/hooks/useTTSControl';
++import { usePdfReflowTTS } from '@/app/reader/hooks/usePdfReflowTTS';
++import { isCfiInLocation } from '@/utils/cfi';
+ import { ttsMediaBridge } from '@/services/tts/ttsMediaBridge';
+ import { eventDispatcher } from '@/utils/event';
+ import { pageBreakFraction } from '@/utils/ttsPageFollow';
+@@ -1259,3 +1261,131 @@ describe('useTTSControl gap control (handleSetSentenceGap / handleSupportsGapCon
+     expect(controller.setParagraphGap).toHaveBeenCalledWith(0.24);
+   });
+ });
++
++describe('useTTSControl explicit page and cancellable startup', () => {
++  type StartupController = {
++    init: ReturnType<typeof vi.fn>;
++    initViewTTS: ReturnType<typeof vi.fn>;
++    speak: ReturnType<typeof vi.fn>;
++    startFromRange: ReturnType<typeof vi.fn>;
++    shutdown: ReturnType<typeof vi.fn>;
++  };
++  const drain = async () => {
++    for (let i = 0; i < 10; i++) await Promise.resolve();
++  };
++  const controller = () => ttsControllerInstances[0] as StartupController;
++  const ReflowHarness = () => {
++    useTTSControl({ bookKey: 'book-1' });
++    const { state } = usePdfReflowTTS({
++      bookKey: 'book-1', page: 0, count: 3, result: null,
++      setPage: vi.fn(), scrollRef: { current: null },
++    });
++    return <output data-testid='reflow-tts-state'>{state}</output>;
++  };
++
++  beforeEach(() => {
++    ttsControllerInstances.length = 0;
++    pendingInitResolvers.length = 0;
++    mockSessionManager.getSessionByHash.mockReturnValue(null);
++    mockSessionManager.getActiveSession.mockReturnValue(null);
++    mockSessionManager.addEventListener.mockClear();
++    mockSessionManager.detach.mockClear();
++    mockSessionManager.stopController.mockClear();
++    getSetTTSEnabledMock().mockClear();
++  });
++  afterEach(() => {
++    cleanup();
++    mockViewSettings.ttsLocation = null;
++    mockProgress.index = 0;
++    mockProgress.range = null;
++    mockBookData.isFixedLayout = false;
++    vi.mocked(isCfiInLocation).mockReturnValue(false);
++    mockView.resolveCFI.mockReturnValue({ index: 0, anchor: () => new Range() });
++  });
++
++  it.each([0, 2])('honors explicit index=%i over progress and a visible saved CFI', async (index) => {
++    mockProgress.index = 1;
++    mockViewSettings.ttsLocation = 'saved-cfi';
++    mockBookData.isFixedLayout = true;
++    vi.mocked(isCfiInLocation).mockReturnValue(true);
++    mockView.resolveCFI.mockReturnValue({ index: 0, anchor: () => new Range() });
++    mockView.resolveCFI.mockClear();
++    render(<Harness />);
++    await act(async () => {
++      const start = eventDispatcher.dispatch('tts-speak', { bookKey: 'book-1', index });
++      await drain();
++      pendingInitResolvers.shift()!();
++      await start;
++    });
++    expect(controller().initViewTTS).toHaveBeenCalledWith(index);
++    expect(mockView.resolveCFI).not.toHaveBeenCalled();
++    expect(controller().startFromRange).not.toHaveBeenCalled();
++    expect(controller().speak).toHaveBeenCalled();
++  });
++
++  it('stops during init and closes resources initialized after the first teardown', async () => {
++    render(<Harness />);
++    let resourcesOpen = false;
++    await act(async () => {
++      const start = eventDispatcher.dispatch('tts-speak', { bookKey: 'book-1' });
++      await drain();
++      controller().shutdown.mockImplementation(async () => { resourcesOpen = false; });
++      await eventDispatcher.dispatch('tts-stop', { bookKey: 'book-1' });
++      // A client can finish opening after stop's initial shutdown has settled.
++      resourcesOpen = true;
++      pendingInitResolvers.shift()!();
++      await start;
++    });
++    expect(controller().initViewTTS).not.toHaveBeenCalled();
++    expect(controller().speak).not.toHaveBeenCalled();
++    expect(resourcesOpen).toBe(false);
++    expect(getSetTTSEnabledMock()).not.toHaveBeenCalledWith('book-1', true);
++  });
++
++  it('cancels rather than detaches a still-starting controller on unmount', async () => {
++    const mounted = render(<Harness />);
++    let finishView!: () => void;
++    let resourcesOpen = false;
++    await act(async () => {
++      const start = eventDispatcher.dispatch('tts-speak', { bookKey: 'book-1' });
++      await drain();
++      controller().initViewTTS.mockImplementation(() => new Promise<void>((resolve) => {
++        finishView = () => { resourcesOpen = true; resolve(); };
++      }));
++      controller().shutdown.mockImplementation(async () => { resourcesOpen = false; });
++      mockSessionManager.getSessionByHash.mockReturnValue({ controller: controller() });
++      pendingInitResolvers.shift()!();
++      await drain();
++      mounted.unmount();
++      await drain();
++      finishView();
++      await start;
++    });
++    expect(controller().speak).not.toHaveBeenCalled();
++    expect(mockSessionManager.detach).not.toHaveBeenCalled();
++    expect(mockSessionManager.stopController).toHaveBeenCalledWith('book', controller(), 'user');
++    expect(resourcesOpen).toBe(false);
++    expect(getSetTTSEnabledMock()).not.toHaveBeenCalledWith('book-1', true);
++  });
++
++  it('keeps the reflow follower stopped when speak synchronously terminates the session', async () => {
++    render(<ReflowHarness />);
++    await act(async () => {
++      const start = eventDispatcher.dispatch('tts-speak', { bookKey: 'book-1', index: 0 });
++      await drain();
++      const listener = mockSessionManager.addEventListener.mock.calls.find(
++        ([name]) => name === 'session-changed',
++      )?.[1] as (event: Event) => void;
++      controller().speak.mockImplementation(() => {
++        listener(new CustomEvent('session-changed', {
++          detail: { reason: 'stopped', session: { controller: controller() } },
++        }));
++      });
++      pendingInitResolvers.shift()!();
++      await start;
++      await eventDispatcher.dispatch('tts-sync-request', { bookKey: 'book-1' });
++    });
++    expect(screen.getByTestId('reflow-tts-state').textContent).toBe('stopped');
++    expect(getSetTTSEnabledMock()).toHaveBeenLastCalledWith('book-1', false);
 +  });
 +});
 diff --git a/apps/readest-app/src/__tests__/styles/reading-polish.browser.test.ts b/apps/readest-app/src/__tests__/styles/reading-polish.browser.test.ts
@@ -935,6 +1556,98 @@ index 0000000..7f1c06a
 +    });
 +  });
 +});
+diff --git a/apps/readest-app/src/__tests__/utils/pdfReflowTTS.test.ts b/apps/readest-app/src/__tests__/utils/pdfReflowTTS.test.ts
+new file mode 100644
+index 0000000..a3eec2d
+--- /dev/null
++++ b/apps/readest-app/src/__tests__/utils/pdfReflowTTS.test.ts
+@@ -0,0 +1,86 @@
++import { describe, expect, it } from 'vitest';
++import { reflowPdfText, type PdfTextItem } from '@/utils/pdfReflow';
++import { mapPdfSpeechRange } from '@/utils/pdfReflowTTS';
++
++const item = (str: string, x = 50, y = 700): PdfTextItem => ({
++  str,
++  transform: [14, 0, 0, 14, x, y],
++  width: str.length * 7,
++  height: 14,
++});
++function fixture(items: PdfTextItem[]) {
++  const page = reflowPdfText(items, 612, 792, true);
++  const doc = document.implementation.createHTMLDocument('');
++  const layer = doc.createElement('div');
++  layer.className = 'textLayer';
++  doc.body.append(layer);
++  const nodes = items.map((item) => {
++    const span = doc.createElement('span');
++    span.textContent = item.str;
++    layer.append(span);
++    return span.firstChild!;
++  });
++  const range = (
++    start: number,
++    from: number,
++    end = start,
++    to = nodes[end]!.textContent!.length,
++  ) => {
++    const range = doc.createRange();
++    range.setStart(nodes[start]!, from);
++    range.setEnd(nodes[end]!, to);
++    return range;
++  };
++  return { page, doc, range };
++}
++const markedText = (f: ReturnType<typeof fixture>, range: Range) =>
++  mapPdfSpeechRange(f.page, range).map((h) => f.page.blocks[h.block]!.text.slice(h.start, h.end));
++
++describe('PDF speech Range provenance', () => {
++  it('identifies the second identical sentence by Range offsets, never the first match', () => {
++    const f = fixture([item('Same sentence.', 50, 700), item('Same sentence.', 50, 650)]);
++    expect(mapPdfSpeechRange(f.page, f.range(1, 0))).toEqual([{ block: 1, start: 0, end: 14 }]);
++  });
++  it('tracks visual reordering while retaining original PDF extraction order', () => {
++    const f = fixture([item('Second.', 50, 650), item('First.', 50, 700)]);
++    expect(mapPdfSpeechRange(f.page, f.range(0, 0))).toEqual([{ block: 1, start: 0, end: 7 }]);
++  });
++  it('maps exact word boundaries without synthesizing fake per-character timestamps', () => {
++    const f = fixture([item('Hello world.')]);
++    expect(markedText(f, f.range(0, 6, 0, 11))).toEqual(['world']);
++  });
++  it('maps a sentence across wrapped runs, injected spaces and soft hyphens', () => {
++    const f = fixture([item('inter\u00ad', 50, 700), item('national text.', 50, 682)]);
++    expect(f.page.blocks[0]!.text).toBe('international text.');
++    expect(markedText(f, f.range(0, 0, 1))).toEqual(['international text.']);
++    const spaces = fixture([item('Hello', 50), item('world.', 95)]);
++    expect(markedText(spaces, spaces.range(0, 0, 1))).toEqual(['Hello world.']);
++  });
++  it('normalizes compatibility glyphs and whitespace consistently', () => {
++    const f = fixture([item('ﬁne  中文。')]);
++    expect(markedText(f, f.range(0, 0))).toEqual(['ﬁne 中文。']);
++  });
++  it('does not highlight a removed footer page number', () => {
++    const f = fixture([item('Body.', 50, 700), item('7', 300, 24)]);
++    expect(markedText(f, f.range(1, 0))).toEqual([]);
++    expect(markedText(f, f.range(0, 0))).toEqual(['Body.']);
++  });
++  it('refuses mismatched transformed documents, foreign ranges, collapsed ranges and missing maps', () => {
++    const f = fixture([item('Original.')]);
++    const r = f.range(0, 0);
++    f.doc.querySelector('.textLayer')!.append('Modified.');
++    expect(mapPdfSpeechRange(f.page, r)).toEqual([]);
++    const other = fixture([item('Other.')]);
++    expect(mapPdfSpeechRange(f.page, other.range(0, 0))).toEqual([]);
++    expect(mapPdfSpeechRange(other.page, other.range(0, 0, 0, 0))).toEqual([]);
++    expect(mapPdfSpeechRange({ blocks: [], warnings: [], removedPageNumbers: [] }, r)).toEqual([]);
++  });
++  it('maps Range boundaries on elements as well as text nodes', () => {
++    const f = fixture([item('First.'), item('Second.', 50, 650)]);
++    const r = f.doc.createRange();
++    const layer = f.doc.querySelector('.textLayer')!;
++    r.setStart(layer, 1);
++    r.setEnd(layer, 2);
++    expect(markedText(f, r)).toEqual(['Second.']);
++  });
++});
 diff --git a/apps/readest-app/src/app/library/components/BookItem.tsx b/apps/readest-app/src/app/library/components/BookItem.tsx
 index d51d285..16d4d45 100644
 --- a/apps/readest-app/src/app/library/components/BookItem.tsx
@@ -1092,7 +1805,7 @@ index 9cedc20..716a88f 100644
                  'placeholder:text-base-content/50 truncate',
                  'focus:outline-hidden focus:ring-0',
 diff --git a/apps/readest-app/src/app/reader/components/HeaderBar.tsx b/apps/readest-app/src/app/reader/components/HeaderBar.tsx
-index 58f1135..32b49f7 100644
+index 58f1135..c03d56a 100644
 --- a/apps/readest-app/src/app/reader/components/HeaderBar.tsx
 +++ b/apps/readest-app/src/app/reader/components/HeaderBar.tsx
 @@ -33,6 +33,8 @@ import NotebookToggler from './NotebookToggler';
@@ -1104,15 +1817,37 @@ index 58f1135..32b49f7 100644
  
  interface HeaderBarProps {
    bookKey: string;
-@@ -85,6 +87,7 @@ const HeaderBar: React.FC<HeaderBarProps> = ({
+@@ -85,8 +87,29 @@ const HeaderBar: React.FC<HeaderBarProps> = ({
  
    const [isDropdownOpen, setIsDropdownOpen] = useState(false);
    const [isMetaHashDialogOpen, setIsMetaHashDialogOpen] = useState(false);
 +  const [isPdfReflowOpen, setIsPdfReflowOpen] = useState(false);
++  const [reflowInitialPage, setReflowInitialPage] = useState<number | undefined>();
++  const defaultReflowBook = useRef<string | null>(null);
    const [headerWidth, setHeaderWidth] = useState(0);
    const view = getView(bookKey);
++  const isPdf = bookData?.book?.format === 'PDF';
++  const viewReady = useReaderStore((state) => state.viewStates[bookKey]?.inited ?? false);
++
++  useEffect(() => {
++    if (defaultReflowBook.current === bookKey) return;
++    if (!isPdf || !viewReady || !view || !bookData?.bookDoc?.sections.length) return;
++    defaultReflowBook.current = bookKey;
++    setReflowInitialPage(undefined);
++    setIsPdfReflowOpen(true);
++  }, [bookKey, isPdf, viewReady, view, bookData?.bookDoc]);
++
++  const openPdfReflow = () => {
++    defaultReflowBook.current = bookKey;
++    setReflowInitialPage(view?.renderer.primaryIndex);
++    setIsDropdownOpen(false);
++    onDropdownOpenChange?.(false);
++    setIsPdfReflowOpen(true);
++  };
    const iconSize18 = useResponsiveSize(18);
-@@ -221,9 +224,12 @@ const HeaderBar: React.FC<HeaderBarProps> = ({
+ 
+   const docs = view?.renderer.getContents() ?? [];
+@@ -221,9 +244,12 @@ const HeaderBar: React.FC<HeaderBarProps> = ({
          ref={headerRef}
          role='banner'
          aria-label={_('Header Bar')}
@@ -1127,11 +1862,28 @@ index 58f1135..32b49f7 100644
            trafficLightInHeader ? 'pl-20' : isSideBarVisible ? 'ps-4' : 'ps-4 sm:ps-1.5',
            appService?.hasRoundedWindow && 'rounded-window-top-right',
            !isSideBarVisible && appService?.hasRoundedWindow && 'rounded-window-top-left',
-@@ -343,8 +349,19 @@ const HeaderBar: React.FC<HeaderBarProps> = ({
+@@ -269,6 +295,16 @@ const HeaderBar: React.FC<HeaderBarProps> = ({
+             >
+               <VscLibrary size={iconSize18} className='fill-base-content' />
+             </button>
++            {isPdf && (
++              <button
++                type='button'
++                className='btn btn-ghost min-h-11 h-11 shrink-0 px-2 text-sm'
++                aria-label={_('Switch to Reflow')}
++                onClick={openPdfReflow}
++              >
++                {_('Switch to Reflow')}
++              </button>
++            )}
+             <BookmarkToggler bookKey={bookKey} />
+             <TranslationToggler bookKey={bookKey} />
+           </div>
+@@ -343,8 +379,20 @@ const HeaderBar: React.FC<HeaderBarProps> = ({
              <ViewMenu
                bookKey={bookKey}
                onShowMetaHashDialog={() => setIsMetaHashDialogOpen(true)}
-+              onOpenPdfReflow={() => setIsPdfReflowOpen(true)}
++              onOpenPdfReflow={openPdfReflow}
              />
            </Dropdown>
 +          {isPdfReflowOpen && bookData?.book?.format === 'PDF' && (
@@ -1139,6 +1891,7 @@ index 58f1135..32b49f7 100644
 +              <PdfReflowDialog
 +                key={bookKey}
 +                bookKey={bookKey}
++                initialPage={reflowInitialPage}
 +                onClose={() => setIsPdfReflowOpen(false)}
 +                onGoToLibrary={onGoToLibrary}
 +              />
@@ -1149,14 +1902,15 @@ index 58f1135..32b49f7 100644
                <SyncInfoDialog
 diff --git a/apps/readest-app/src/app/reader/components/PdfReflowDialog.tsx b/apps/readest-app/src/app/reader/components/PdfReflowDialog.tsx
 new file mode 100644
-index 0000000..1ba1230
+index 0000000..47a5edd
 --- /dev/null
 +++ b/apps/readest-app/src/app/reader/components/PdfReflowDialog.tsx
-@@ -0,0 +1,331 @@
+@@ -0,0 +1,413 @@
 +import { useEffect, useRef, useState } from 'react';
 +import { useThemeStore } from '@/store/themeStore';
 +import { eventDispatcher } from '@/utils/event';
 +import { useReflowNavigation } from '../hooks/useReflowNavigation';
++import { usePdfReflowTTS } from '../hooks/usePdfReflowTTS';
 +import { useBookDataStore } from '@/store/bookDataStore';
 +import { useReaderStore } from '@/store/readerStore';
 +import { useTranslation } from '@/hooks/useTranslation';
@@ -1166,26 +1920,37 @@ index 0000000..1ba1230
 +
 +interface Props {
 +  bookKey: string;
++  /** Manual original→reflow entry overrides the saved page. Default opening
++   * leaves this undefined to restore the previous reflow session. */
++  initialPage?: number;
 +  onClose: () => void;
 +  onGoToLibrary?: () => void;
 +}
 +
 +/** Intentionally read-only, page-based reflow. Never creates synthetic CFIs or
 + * writes annotations/positions into the original document while reading text. */
-+const PdfReflowDialog = ({ bookKey, onClose, onGoToLibrary }: Props) => {
++const PdfReflowDialog = ({ bookKey, initialPage, onClose, onGoToLibrary }: Props) => {
 +  const _ = useTranslation();
 +  const { safeAreaInsets, statusBarHeight, systemUIVisible } = useThemeStore();
 +  const [chromeVisible, setChromeVisible] = useState(false);
 +  const [settingsOpen, setSettingsOpen] = useState(false);
 +  const rootRef = useRef<HTMLDivElement>(null);
 +  const exiting = useRef(false);
-+  const pointer = useRef<{ x: number; y: number; time: number; moved: boolean } | null>(null);
++  const pointer = useRef<{
++    x: number;
++    y: number;
++    time: number;
++    moved: boolean;
++    down: boolean;
++  } | null>(null);
 +  const { getBookData } = useBookDataStore();
 +  const { getView, getProgress } = useReaderStore();
 +  const bookDoc = getBookData(bookKey)?.bookDoc;
 +  const count = bookDoc?.sections.length ?? 0;
 +  const [saved] = useState(() => readReflowSession(bookKey, count));
 +  const [page, setPage] = useState(() => {
++    if (initialPage !== undefined && Number.isInteger(initialPage))
++      return Math.max(0, Math.min(count - 1, initialPage));
 +    if (saved) return saved.page;
 +    const index =
 +      getView(bookKey)?.renderer.primaryIndex ?? getProgress(bookKey)?.section.current ?? 0;
@@ -1203,6 +1968,11 @@ index 0000000..1ba1230
 +
 +  const scrollRef = useRef<HTMLElement>(null);
 +  const cacheRef = useRef(new Map<number, ReflowPage>());
++  const tts = usePdfReflowTTS({ bookKey, page, count, result, setPage, scrollRef });
++
++  useEffect(() => {
++    cacheRef.current.clear();
++  }, [bookKey, bookDoc]);
 +
 +  useEffect(() => {
 +    let current = true;
@@ -1222,7 +1992,7 @@ index 0000000..1ba1230
 +          parsed =
 +            data.rotation % 360 !== 0
 +              ? { blocks: [], removedPageNumbers: [], warnings: ['rotated-page'] }
-+              : reflowPdfText(data.items, data.width, data.height);
++              : reflowPdfText(data.items, data.width, data.height, true);
 +          if (!current) return;
 +          cacheRef.current.set(page, parsed);
 +          while (cacheRef.current.size > 12) {
@@ -1281,6 +2051,7 @@ index 0000000..1ba1230
 +      setPageInput(String(page + 1));
 +      return;
 +    }
++    tts.suspendFollowing();
 +    setPage(next);
 +  };
 +
@@ -1309,7 +2080,7 @@ index 0000000..1ba1230
 +          {_('Go to Library')}
 +        </button>
 +        <button type='button' onClick={returnToOriginal}>
-+          {_('Back to Original Page')}
++          {_('Switch to PDF')}
 +        </button>
 +        <button
 +          type='button'
@@ -1375,17 +2146,37 @@ index 0000000..1ba1230
 +      <article
 +        ref={scrollRef}
 +        onPointerDown={(e) => {
-+          pointer.current = { x: e.clientX, y: e.clientY, time: Date.now(), moved: false };
++          pointer.current = {
++            x: e.clientX,
++            y: e.clientY,
++            time: Date.now(),
++            moved: false,
++            down: true,
++          };
++        }}
++        onPointerUp={() => {
++          if (pointer.current) pointer.current.down = false;
 +        }}
 +        onPointerMove={(e) => {
 +          const p = pointer.current;
-+          if (p && Math.hypot(e.clientX - p.x, e.clientY - p.y) > 8) p.moved = true;
++          if (p && Math.hypot(e.clientX - p.x, e.clientY - p.y) > 8) {
++            p.moved = true;
++            tts.suspendFollowing();
++          }
 +        }}
 +        onPointerCancel={() => {
 +          pointer.current = null;
 +        }}
++        onWheel={tts.suspendFollowing}
++        onKeyDown={(e) => {
++          if (['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' '].includes(e.key))
++            tts.suspendFollowing();
++        }}
 +        onScroll={() => {
-+          if (pointer.current) pointer.current.moved = true;
++          if (pointer.current?.down) {
++            pointer.current.moved = true;
++            tts.suspendFollowing();
++          }
 +        }}
 +        onClick={(e) => {
 +          const p = pointer.current;
@@ -1416,15 +2207,27 @@ index 0000000..1ba1230
 +                {_('No usable text on this page. View the original page; OCR is not included.')}
 +              </p>
 +            )}
-+            {result.blocks.map((block, i) =>
-+              block.kind === 'note' ? (
++            {result.blocks.map((block, i) => {
++              const parts: import('react').ReactNode[] = [];
++              let cursor = 0;
++              for (const h of tts.highlights.filter((h) => h.block === i)) {
++                parts.push(block.text.slice(cursor, h.start));
++                parts.push(
++                  <mark data-reflow-tts key={h.start}>
++                    {block.text.slice(h.start, h.end)}
++                  </mark>,
++                );
++                cursor = h.end;
++              }
++              parts.push(block.text.slice(cursor));
++              return block.kind === 'note' ? (
 +                <aside className='pdf-reflow-note' key={i}>
-+                  {block.text}
++                  {parts}
 +                </aside>
 +              ) : (
-+                <p key={i}>{block.text}</p>
-+              ),
-+            )}
++                <p key={i}>{parts}</p>
++              );
++            })}
 +          </>
 +        )}
 +        <nav className='pdf-reflow-end-navigation' aria-label={_('Page Navigation')}>
@@ -1439,6 +2242,38 @@ index 0000000..1ba1230
 +          </button>
 +        </nav>
 +      </article>
++      <div className='pdf-reflow-tts' role='group' aria-label={_('Read Aloud')}>
++        <button
++          type='button'
++          disabled={tts.pending || !count}
++          onClick={() => void tts.toggle()}
++          aria-label={
++            tts.state === 'playing'
++              ? _('Pause')
++              : tts.state === 'paused'
++                ? _('Resume')
++                : _('Read Aloud')
++          }
++        >
++          {tts.pending
++            ? _('Loading…')
++            : tts.state === 'playing'
++              ? _('Pause')
++              : tts.state === 'paused'
++                ? _('Resume')
++                : _('Read Aloud')}
++        </button>
++        {(tts.state !== 'stopped' || tts.pending) && (
++          <button type='button' onClick={tts.stop}>
++            {_('Stop')}
++          </button>
++        )}
++        {!tts.following && (tts.state !== 'stopped' || tts.pending) && (
++          <button type='button' onClick={tts.returnToSpeech}>
++            {_('Return to Current Speech')}
++          </button>
++        )}
++      </div>
 +      <button
 +        className='pdf-reflow-reveal'
 +        type='button'
@@ -1653,6 +2488,172 @@ index 2f26925..eb9ff1f 100644
        style={{
          bottom: appService?.isAndroidApp
            ? `calc(env(safe-area-inset-bottom) + 64px)`
+diff --git a/apps/readest-app/src/app/reader/hooks/usePdfReflowTTS.ts b/apps/readest-app/src/app/reader/hooks/usePdfReflowTTS.ts
+new file mode 100644
+index 0000000..73ad42d
+--- /dev/null
++++ b/apps/readest-app/src/app/reader/hooks/usePdfReflowTTS.ts
+@@ -0,0 +1,160 @@
++import { useCallback, useEffect, useRef, useState, type RefObject } from 'react';
++import { eventDispatcher } from '@/utils/event';
++import { mapPdfSpeechRange, type ReflowHighlight } from '@/utils/pdfReflowTTS';
++import type { ReflowPage } from '@/utils/pdfReflow';
++
++interface Position {
++  bookKey: string;
++  sectionIndex: number;
++  sequence: number;
++  kind: 'sentence' | 'word';
++  range?: Range;
++}
++interface Props {
++  bookKey: string;
++  page: number;
++  count: number;
++  result: ReflowPage | null;
++  setPage: (page: number) => void;
++  scrollRef: RefObject<HTMLElement | null>;
++}
++
++/** A follower/transport surface only. useTTSControl in the reader remains the
++ * sole owner of the TTSController and TTSSessionManager. Closing this overlay
++ * removes listeners, never stops/detaches audio or creates a second engine. */
++export function usePdfReflowTTS({ bookKey, page, count, result, setPage, scrollRef }: Props) {
++  const [state, setState] = useState<'playing' | 'paused' | 'stopped'>('stopped');
++  const [pending, setPending] = useState(false);
++  const [following, setFollowing] = useState(true);
++  const [position, setPosition] = useState<Position | null>(null);
++  const [highlights, setHighlights] = useState<ReflowHighlight[]>([]);
++  const followingRef = useRef(true);
++  const pendingRef = useRef(false);
++  const sequenceRef = useRef(-1);
++  const requestRef = useRef(0);
++  const mountedRef = useRef(false);
++  const currentRef = useRef({ page, count, setPage, position, state });
++  currentRef.current = { page, count, setPage, position, state };
++
++  useEffect(() => {
++    mountedRef.current = true;
++    let active = true;
++    followingRef.current = true;
++    pendingRef.current = false;
++    setFollowing(true);
++    setPending(false);
++    sequenceRef.current = -1;
++    setPosition(null);
++    setHighlights([]);
++    setState('stopped');
++    const onPosition = (event: CustomEvent<Position>) => {
++      const p = event.detail;
++      if (
++        !active ||
++        p?.bookKey !== bookKey ||
++        !Number.isInteger(p.sectionIndex) ||
++        p.sectionIndex < 0 ||
++        p.sectionIndex >= currentRef.current.count ||
++        !Number.isFinite(p.sequence) ||
++        p.sequence <= sequenceRef.current
++      )
++        return;
++      sequenceRef.current = p.sequence;
++      setPosition(p);
++      // Physical PDF section boundaries, not reflow paragraph counts.
++      if (followingRef.current && p.sectionIndex !== currentRef.current.page)
++        currentRef.current.setPage(p.sectionIndex);
++    };
++    const onState = (event: CustomEvent) => {
++      if (!active || event.detail?.bookKey !== bookKey) return;
++      const next = event.detail.state;
++      if (next !== 'playing' && next !== 'paused' && next !== 'stopped') return;
++      setState(next);
++      if (next === 'stopped') {
++        setPosition(null);
++        setHighlights([]);
++      }
++    };
++    eventDispatcher.on('tts-position', onPosition);
++    eventDispatcher.on('tts-playback-state', onState);
++    void eventDispatcher.dispatch('tts-sync-request', { bookKey });
++    return () => {
++      active = false;
++      mountedRef.current = false;
++      requestRef.current++;
++      eventDispatcher.off('tts-position', onPosition);
++      eventDispatcher.off('tts-playback-state', onState);
++    };
++  }, [bookKey]);
++
++  useEffect(() => {
++    setHighlights(
++      position?.sectionIndex === page && position.range && result
++        ? mapPdfSpeechRange(result, position.range)
++        : [],
++    );
++  }, [page, result, position]);
++
++  useEffect(() => {
++    if (!following || !highlights.length) return;
++    // Use the actual marked span, not synthetic timed words. 'nearest' avoids
++    // repeatedly moving a sentence already on screen; no smooth-scroll races.
++    scrollRef.current?.querySelector('mark[data-reflow-tts]')?.scrollIntoView?.({
++      block: 'nearest',
++      inline: 'nearest',
++      behavior: 'instant',
++    });
++  }, [following, highlights, scrollRef]);
++
++  const suspendFollowing = useCallback(() => {
++    if (
++      !currentRef.current.position &&
++      currentRef.current.state === 'stopped' &&
++      !pendingRef.current
++    )
++      return;
++    followingRef.current = false;
++    setFollowing(false);
++  }, []);
++  const returnToSpeech = useCallback(() => {
++    followingRef.current = true;
++    setFollowing(true);
++    const p = currentRef.current.position;
++    if (p) currentRef.current.setPage(p.sectionIndex);
++    void eventDispatcher.dispatch('tts-sync-request', { bookKey });
++  }, [bookKey]);
++
++  const toggle = useCallback(async () => {
++    if (pendingRef.current) return;
++    pendingRef.current = true;
++    setPending(true);
++    const request = ++requestRef.current;
++    try {
++      if (currentRef.current.state === 'stopped') {
++        followingRef.current = true;
++        setFollowing(true);
++        // Explicit index: starts at this physical page, not the saved PDF CFI.
++        await eventDispatcher.dispatch('tts-speak', { bookKey, index: currentRef.current.page });
++      } else {
++        await eventDispatcher.dispatch('tts-toggle-play', { bookKey });
++      }
++      if (mountedRef.current && request === requestRef.current)
++        await eventDispatcher.dispatch('tts-sync-request', { bookKey });
++    } finally {
++      if (mountedRef.current && request === requestRef.current) {
++        pendingRef.current = false;
++        setPending(false);
++      }
++    }
++  }, [bookKey]);
++  const stop = useCallback(() => {
++    requestRef.current++;
++    pendingRef.current = false;
++    setPending(false);
++    setState('stopped');
++    setPosition(null);
++    setHighlights([]);
++    void eventDispatcher.dispatch('tts-stop', { bookKey });
++  }, [bookKey]);
++  return { state, pending, following, highlights, toggle, stop, suspendFollowing, returnToSpeech };
++}
 diff --git a/apps/readest-app/src/app/reader/hooks/useReflowNavigation.ts b/apps/readest-app/src/app/reader/hooks/useReflowNavigation.ts
 new file mode 100644
 index 0000000..48a6796
@@ -1730,6 +2731,166 @@ index 0000000..48a6796
 +    };
 +  }, [root, appService?.isAndroidApp, acquireBackKeyInterception, releaseBackKeyInterception]);
 +}
+diff --git a/apps/readest-app/src/app/reader/hooks/useTTSControl.ts b/apps/readest-app/src/app/reader/hooks/useTTSControl.ts
+index 9947379..855fea5 100644
+--- a/apps/readest-app/src/app/reader/hooks/useTTSControl.ts
++++ b/apps/readest-app/src/app/reader/hooks/useTTSControl.ts
+@@ -84,6 +84,7 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
+   const previousSectionLabelRef = useRef<string | undefined>(undefined);
+   const ttsControllerRef = useRef<TTSController | null>(null);
+   const isStartingTTSRef = useRef(false);
++  const ttsStartGenerationRef = useRef(0);
+   // Last broadcast playback state, so a follower engaging mid-session can be
+   // replayed the current state on demand (see handleTTSSyncRequest).
+   const playbackStateRef = useRef<'playing' | 'paused' | 'stopped'>('stopped');
+@@ -216,11 +217,16 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
+       eventDispatcher.off('tts-set-rate', handleTTSSetRate);
+       eventDispatcher.off('tts-highlight-sentence', handleTTSHighlightSentence);
+       eventDispatcher.off('tts-sync-request', handleTTSSyncRequest);
++      ttsStartGenerationRef.current++;
+       if (ttsControllerRef.current) {
+         const controller = ttsControllerRef.current;
+         const bookHash = getBookHashFromKey(bookKey);
+         const session = ttsSessionManager.getSessionByHash(bookHash);
+-        if (session?.controller === controller && !controller.terminated) {
++        if (
++          !isStartingTTSRef.current &&
++          session?.controller === controller &&
++          !controller.terminated
++        ) {
+           // Ownership transfers to the manager: the session keeps playing
+           // headless (route unmount, deep-link book switch, split-view pane
+           // close all funnel through this cleanup).
+@@ -251,10 +257,12 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
+       ) {
+         return;
+       }
++      ttsStartGenerationRef.current++;
+       ttsControllerRef.current = null;
+       setTtsController(null);
+       setIsPlaying(false);
+       setIsPaused(false);
++      emitPlaybackState('stopped');
+       setShowIndicator(false);
+       setShowBackToCurrentTTSLocation(false);
+       setTTSEnabled(bookKey, false);
+@@ -614,11 +622,11 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
+       if (state === 'playing') {
+         setIsPlaying(true);
+         setIsPaused(false);
+-        playbackStateRef.current = 'playing';
++        emitPlaybackState('playing');
+       } else if (state.includes('paused')) {
+         setIsPlaying(false);
+         setIsPaused(true);
+-        playbackStateRef.current = 'paused';
++        emitPlaybackState('paused');
+       }
+     };
+ 
+@@ -878,6 +886,8 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
+     // end up creating two TTSController instances that speak simultaneously.
+     if (isStartingTTSRef.current) return;
+     isStartingTTSRef.current = true;
++    const startGeneration = ++ttsStartGenerationRef.current;
++    let startingController: TTSController | null = null;
+ 
+     try {
+       const view = getView(bookKey);
+@@ -889,7 +899,7 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
+       const ttsSpeakRange = range as Range | null;
+       let ttsFromRange = ttsSpeakRange;
+       let ttsFromIndex = typeof index === 'number' ? index : null;
+-      if (!ttsFromRange && viewSettings.ttsLocation) {
++      if (!ttsFromRange && ttsFromIndex === null && viewSettings.ttsLocation) {
+         const ttsCfi = viewSettings.ttsLocation;
+         if (isCfiInLocation(ttsCfi, location)) {
+           const { index, anchor } = view.resolveCFI(ttsCfi);
+@@ -901,7 +911,7 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
+         }
+       }
+ 
+-      if (!ttsFromIndex) {
++      if (ttsFromIndex === null) {
+         ttsFromIndex = progress.index;
+       }
+ 
+@@ -955,6 +965,10 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
+           preprocessSSMLForTTS,
+           handleSectionChange,
+         );
++        startingController = ttsController;
++        const startIsCurrent = () =>
++          startGeneration === ttsStartGenerationRef.current &&
++          ttsControllerRef.current === ttsController;
+         ttsController.setSkipInlineAnnotations(viewSettings.ttsSkipInlineAnnotations ?? false);
+         // The constructor takes the view directly (attachView, which also binds
+         // this, only runs on the background-session reattach path), so set the
+@@ -989,7 +1003,9 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
+         // own narration or a synthesized voice.
+         ttsController.useNarration = viewSettings.ttsUseNarration ?? true;
+         await ttsController.init();
++        if (!startIsCurrent()) return;
+         await ttsController.initViewTTS(ttsFromIndex);
++        if (!startIsCurrent()) return;
+         ttsController.updateHighlightOptions(
+           getTTSHighlightOptions(
+             viewSettings.ttsHighlightOptions,
+@@ -1026,17 +1042,21 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
+           // so it must not be treated as a one-shot utterance that stops the
+           // session the moment the first clip ends.
+           ttsController.speak(ssml, oneTime && !narrateSelection, () => handleStop(bookKey));
++          if (!startIsCurrent()) return;
+           ttsController.setTargetLang(getTTSTargetLang() || '');
+         } else {
+           // Nothing to speak: roll back the optimistic playing state.
+           setIsPlaying(false);
++          emitPlaybackState('stopped');
+         }
+         setTtsClientsInitialized(true);
+         syncClientCapabilities();
+         setTTSEnabled(bookKey, true);
+       } catch (error) {
++        if (startGeneration !== ttsStartGenerationRef.current) return;
+         setShowIndicator(false);
+         setIsPlaying(false);
++        emitPlaybackState('stopped');
+         eventDispatcher.dispatch('toast', {
+           message: _('TTS not supported for this document'),
+           type: 'error',
+@@ -1044,13 +1064,31 @@ export const useTTSControl = ({ bookKey, onRequestHidePanel }: UseTTSControlProp
+         console.error(error);
+       }
+     } finally {
+-      isStartingTTSRef.current = false;
++      try {
++        if (
++          startingController &&
++          (startGeneration !== ttsStartGenerationRef.current ||
++            ttsControllerRef.current !== startingController)
++        ) {
++          // stop/unmount may have shut down before init finished opening its
++          // clients or document. Rejoin teardown after the last startup await
++          // so those late resources cannot outlive the cancelled controller.
++          await ttsSessionManager.stopController(
++            getBookHashFromKey(bookKey),
++            startingController,
++            'user',
++          );
++        }
++      } finally {
++        isStartingTTSRef.current = false;
++      }
+     }
+   };
+ 
+   const handleTTSStop = async (event: CustomEvent) => {
+     const { bookKey: ttsBookKey } = event.detail;
+     if (bookKey !== ttsBookKey) return;
++    ttsStartGenerationRef.current++;
+     if (ttsControllerRef.current) {
+       await handleStop(bookKey);
+     } else {
 diff --git a/apps/readest-app/src/components/Dialog.tsx b/apps/readest-app/src/components/Dialog.tsx
 index c6666dc..d9e8b57 100644
 --- a/apps/readest-app/src/components/Dialog.tsx
@@ -1914,6 +3075,61 @@ index 96f5ed9..985e83b 100644
  
    // EPUB 3 Media Overlays: the manifest item of this section's SMIL file, or
    // null when the section has no recorded narration. Populated by foliate's
+diff --git a/apps/readest-app/src/services/tts/TTSController.ts b/apps/readest-app/src/services/tts/TTSController.ts
+index 240fc99..79f3a7a 100644
+--- a/apps/readest-app/src/services/tts/TTSController.ts
++++ b/apps/readest-app/src/services/tts/TTSController.ts
+@@ -667,7 +667,7 @@ export class TTSController extends EventTarget {
+ 
+   async initViewTTS(index?: number) {
+     if (this.#ttsSectionIndex === -1) {
+-      const fromSectionIndex = (index || this.#getPrimaryContent()?.index) ?? 0;
++      const fromSectionIndex = index ?? this.#getPrimaryContent()?.index ?? 0;
+       await this.#initTTSForSection(fromSectionIndex);
+     }
+   }
+@@ -1895,7 +1895,14 @@ export class TTSController extends EventTarget {
+   // Canonical position signal emitted from the same paths as
+   // tts-highlight-mark / tts-highlight-word. The controller is the source of
+   // truth (it owns the section index and current word/sentence CFI).
+-  #dispatchPosition(cfi: string, kind: 'word' | 'sentence') {
++  #dispatchPosition(cfi: string, kind: 'word' | 'sentence', positionRange?: Range) {
++    // PDF CFIs can belong to a controller-owned offscreen textLayer rather
++    // than the renderer's current document. Carry its real Range locally so
++    // reflow never guesses by a repeated sentence or manufactures a CFI.
++    const range = positionRange ?? this.#getCurrentPlaybackRange();
++    const pdfRange = range?.startContainer.ownerDocument?.querySelector('.textLayer')
++      ? range.cloneRange()
++      : undefined;
+     this.dispatchEvent(
+       new CustomEvent('tts-position', {
+         detail: {
+@@ -1903,6 +1910,7 @@ export class TTSController extends EventTarget {
+           kind,
+           sectionIndex: this.#ttsSectionIndex,
+           sequence: ++ttsPositionSequence,
++          ...(pdfRange ? { range: pdfRange } : {}),
+         },
+       }),
+     );
+@@ -2087,7 +2095,7 @@ export class TTSController extends EventTarget {
+       try {
+         const cfi = this.view.getCFI(this.#ttsSectionIndex, this.#lastSpeakWordRange);
+         if (cfi) {
+-          this.#dispatchPosition(cfi, 'word');
++          this.#dispatchPosition(cfi, 'word', this.#lastSpeakWordRange);
+           return;
+         }
+       } catch {}
+@@ -2149,7 +2157,7 @@ export class TTSController extends EventTarget {
+         const cfi = this.view.getCFI(this.#ttsSectionIndex, range);
+         if (cfi) {
+           this.dispatchEvent(new CustomEvent('tts-highlight-word', { detail: { cfi } }));
+-          this.#dispatchPosition(cfi, 'word');
++          this.#dispatchPosition(cfi, 'word', range);
+         }
+       } catch {}
+     }
 diff --git a/apps/readest-app/src/styles/dialog-polish.css b/apps/readest-app/src/styles/dialog-polish.css
 new file mode 100644
 index 0000000..3af3154
@@ -2122,10 +3338,10 @@ index 0000000..9961e02
 +}
 diff --git a/apps/readest-app/src/styles/pdf-reflow.css b/apps/readest-app/src/styles/pdf-reflow.css
 new file mode 100644
-index 0000000..5947133
+index 0000000..aa5c27b
 --- /dev/null
 +++ b/apps/readest-app/src/styles/pdf-reflow.css
-@@ -0,0 +1,194 @@
+@@ -0,0 +1,232 @@
 +.pdf-reflow-reader {
 +  position: absolute;
 +  inset: 0;
@@ -2248,6 +3464,7 @@ index 0000000..5947133
 +  transform: translateY(-8px);
 +}
 +.pdf-reflow-toolbar button {
++  min-width: 44px;
 +  border: 0;
 +  padding-inline: 8px;
 +}
@@ -2319,6 +3536,43 @@ index 0000000..5947133
 +  opacity: 1;
 +  color: var(--color-base-content);
 +  border-style: dashed;
++}
++
++/* Read-aloud transport stays reachable when the reading chrome is hidden. */
++.pdf-reflow-tts {
++  position: absolute;
++  z-index: 2;
++  bottom: calc(70px + var(--safe-bottom));
++  inset-inline: 16px;
++  display: flex;
++  flex-wrap: wrap;
++  justify-content: center;
++  gap: 6px;
++  pointer-events: none;
++}
++.pdf-reflow-tts button {
++  pointer-events: auto;
++  box-shadow: 0 2px 12px rgb(0 0 0 / 0.12);
++  font-size: 13px;
++}
++.pdf-reflow-page {
++  padding-bottom: calc(136px + var(--safe-bottom));
++}
++.pdf-reflow-page mark[data-reflow-tts] {
++  color: inherit;
++  background: color-mix(in srgb, var(--color-primary) 24%, var(--color-base-100));
++  border-radius: 3px;
++  box-decoration-break: clone;
++  -webkit-box-decoration-break: clone;
++  scroll-margin-block: calc(96px + var(--safe-top)) calc(140px + var(--safe-bottom));
++}
++html[data-eink='true'] .pdf-reflow-page mark[data-reflow-tts] {
++  background: transparent;
++  text-decoration: underline;
++  text-decoration-thickness: 2px;
++}
++html[data-eink='true'] .pdf-reflow-tts button {
++  box-shadow: none;
 +}
 diff --git a/apps/readest-app/src/styles/reader-polish.css b/apps/readest-app/src/styles/reader-polish.css
 new file mode 100644
@@ -2444,10 +3698,10 @@ index 0000000..9a305ab
 +};
 diff --git a/apps/readest-app/src/utils/pdfReflow.ts b/apps/readest-app/src/utils/pdfReflow.ts
 new file mode 100644
-index 0000000..d96f23e
+index 0000000..f1a0c87
 --- /dev/null
 +++ b/apps/readest-app/src/utils/pdfReflow.ts
-@@ -0,0 +1,234 @@
+@@ -0,0 +1,306 @@
 +export interface PdfTextItem {
 +  str: string;
 +  transform: number[];
@@ -2466,10 +3720,51 @@ index 0000000..d96f23e
 +  blocks: ReflowBlock[];
 +  removedPageNumbers: string[];
 +  warnings: string[];
++  /** Optional local-only provenance: normalized PDF item stream and, per block,
++   * the source character offset for every displayed UTF-16 character (-1 = spacing). */
++  sourceText?: string;
++  sourceMap?: number[][];
 +}
 +
-+type Run = { text: string; x: number; y: number; size: number; width: number; rotated: boolean };
-+type Line = { runs: Run[]; y: number; size: number; x: number; end: number; text: string };
++type Run = {
++  text: string;
++  source: number[];
++  x: number;
++  y: number;
++  size: number;
++  width: number;
++  rotated: boolean;
++};
++type Line = {
++  runs: Run[];
++  y: number;
++  size: number;
++  x: number;
++  end: number;
++  text: string;
++  source: number[];
++};
++
++export const normalizePdfSpeechText = (text: string) =>
++  text.normalize('NFKC').replace(/[\s\u00ad]/gu, '');
++
++function joinMapped(
++  left: { text: string; source: number[] },
++  right: { text: string; source: number[] },
++  space: boolean,
++  wrapped = false,
++) {
++  const text = joinText(left.text, right.text, space, wrapped);
++  const b = right.text.trimStart().trimEnd();
++  // joinText preserves the right's trailing whitespace only after a nonempty left.
++  const rightText = left.text ? right.text.trimStart() : b;
++  const prefix = text.length - rightText.length;
++  const source = left.source.slice(0, Math.min(prefix, left.text.trimEnd().length));
++  while (source.length < prefix) source.push(-1);
++  const rightStart = right.text.length - right.text.trimStart().length;
++  source.push(...right.source.slice(rightStart, rightStart + rightText.length));
++  return { text, source };
++}
 +
 +const cjk = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u;
 +const closing = /^[,.;:!?，。；：！？、）】》」』〉〕］｝％%…]/u;
@@ -2520,13 +3815,32 @@ index 0000000..d96f23e
 +  items: PdfTextItem[],
 +  pageWidth: number,
 +  pageHeight: number,
++  withSourceMap = false,
 +): ReflowPage {
 +  const result: ReflowPage = { blocks: [], removedPageNumbers: [], warnings: [] };
++  let sourceText = '';
++  const blockSources: number[][] = [];
++  if (withSourceMap) {
++    result.sourceMap = blockSources;
++    result.sourceText = '';
++  }
 +  const warn = (code: string) => {
 +    if (!result.warnings.includes(code)) result.warnings.push(code);
 +  };
 +  const runs: Run[] = [];
 +  for (const item of items) {
++    const source: number[] = [];
++    let text = '';
++    for (const char of item.str) {
++      const normalized = normalizePdfSpeechText(char);
++      const offset = sourceText.length;
++      sourceText += normalized;
++      const display = /\s/u.test(char) ? ' ' : char;
++      if (display === ' ' && text.endsWith(' ')) continue;
++      text += display;
++      for (let i = 0; i < display.length; i++) source.push(normalized ? offset : -1);
++    }
++    if (withSourceMap) result.sourceText = sourceText;
 +    if (!item.str.trim()) continue;
 +    const [a, b, c, d, x, y] = item.transform;
 +    if (item.transform.length < 6 || ![a, b, c, d, x, y, item.width].every(Number.isFinite)) {
@@ -2542,7 +3856,8 @@ index 0000000..d96f23e
 +    const rotated = Math.abs(Math.atan2(b!, a!)) > 0.12 || item.dir === 'ttb';
 +    if (rotated) warn('rotated-text');
 +    runs.push({
-+      text: item.str.replace(/\s+/gu, ' '),
++      text,
++      source,
 +      x: x!,
 +      y: y!,
 +      size,
@@ -2589,6 +3904,7 @@ index 0000000..d96f23e
 +        x: run.x,
 +        end: run.x + run.width,
 +        text: '',
++        source: [],
 +      });
 +    }
 +  }
@@ -2614,11 +3930,13 @@ index 0000000..d96f23e
 +        !!previous &&
 +        Math.min(previous.size, run.size) < Math.max(previous.size, run.size) * 0.8 &&
 +        Math.abs(previous.y - run.y) > line.size * 0.15;
-+      line.text = joinText(
-+        line.text,
-+        run.text,
++      const joined = joinMapped(
++        line,
++        run,
 +        !superscript && (explicitSpace || gap > line.size * 0.12),
 +      );
++      line.text = joined.text;
++      line.source = joined.source;
 +      previous = run;
 +    }
 +    if (wideGap) wideGapRows++;
@@ -2675,8 +3993,16 @@ index 0000000..d96f23e
 +      rotated
 +    ) {
 +      result.blocks.push({ kind, text: line.text });
++      blockSources.push(line.source);
 +    } else {
-+      last.text = joinText(last.text, line.text, true, true);
++      const joined = joinMapped(
++        { text: last.text, source: blockSources[blockSources.length - 1]! },
++        line,
++        true,
++        true,
++      );
++      last.text = joined.text;
++      blockSources[blockSources.length - 1] = joined.source;
 +    }
 +    previous = line;
 +  }
@@ -2718,17 +4044,71 @@ index 0000000..1175226
 +    /* Reading still works if storage is unavailable. */
 +  }
 +}
+diff --git a/apps/readest-app/src/utils/pdfReflowTTS.ts b/apps/readest-app/src/utils/pdfReflowTTS.ts
+new file mode 100644
+index 0000000..2062ead
+--- /dev/null
++++ b/apps/readest-app/src/utils/pdfReflowTTS.ts
+@@ -0,0 +1,48 @@
++import { normalizePdfSpeechText, type ReflowPage } from './pdfReflow';
++
++export interface ReflowHighlight {
++  block: number;
++  start: number;
++  end: number;
++}
++
++/** Never search for the sounding sentence in the page. The Range's text-layer
++ * offsets identify its exact PDF-item-stream occurrence, including repeated
++ * lines and visually reordered runs. If PDF.js/transformers changed the source
++ * stream we cannot prove provenance and deliberately paint nothing. */
++export function mapPdfSpeechRange(page: ReflowPage, range: Range): ReflowHighlight[] {
++  if (!page.sourceMap || page.sourceText === undefined || range.collapsed) return [];
++  try {
++    const doc = range.startContainer.ownerDocument;
++    const layer = doc?.querySelector('.textLayer');
++    if (!layer || !layer.contains(range.startContainer) || !layer.contains(range.endContainer))
++      return [];
++    if (normalizePdfSpeechText(layer.textContent ?? '') !== page.sourceText) return [];
++    const prefix = doc!.createRange();
++    prefix.selectNodeContents(layer);
++    prefix.setEnd(range.startContainer, range.startOffset);
++    const start = normalizePdfSpeechText(prefix.toString()).length;
++    prefix.setEnd(range.endContainer, range.endOffset);
++    const end = normalizePdfSpeechText(prefix.toString()).length;
++    if (end <= start) return [];
++    const highlights: ReflowHighlight[] = [];
++    page.sourceMap.forEach((source, block) => {
++      let from = -1;
++      for (let i = 0; i <= source.length; i++) {
++        const offset = source[i] ?? -1;
++        const inside = offset >= start && offset < end;
++        // Include inserted whitespace only between two mapped characters.
++        if (inside && from < 0) from = i;
++        if ((!inside && offset !== -1 && from >= 0) || (i === source.length && from >= 0)) {
++          let to = i;
++          while (to > from && source[to - 1] === -1) to--;
++          if (to > from) highlights.push({ block, start: from, end: to });
++          from = -1;
++        }
++      }
++    });
++    return highlights;
++  } catch {
++    return [];
++  }
++}
 diff --git a/docs/pdf-reflow.md b/docs/pdf-reflow.md
 new file mode 100644
-index 0000000..c66099a
+index 0000000..05b24ff
 --- /dev/null
 +++ b/docs/pdf-reflow.md
-@@ -0,0 +1,47 @@
+@@ -0,0 +1,58 @@
 +# PDF 文字重排（单栏文字版）
 +
 +## 入口与使用
 +
-+打开 PDF → 点正文唤出阅读工具栏 → 顶栏「查看选项」菜单 →「PDF 文字重排」。
++打开 PDF，原版视图恢复完成后默认进入文字重排。轻点正文唤出顶部工具栏，「切换为 PDF」回到对应原文件页；原版顶部直接提供「切换为重排」，不必进入更多菜单。手动切原版后，本次阅读不会自动抢回重排；重新打开 PDF 仍默认重排。
 +
 +- 当前原文件页码进入，竖向滚动读本页；上一页、下一页或输入原文件页码跳转。
 +- 字号 16–36px、三档行距；使用当前应用主题。
@@ -2736,7 +4116,10 @@ index 0000000..c66099a
 +- Android系统返回或Escape：若设置展开先收起，否则直接返回书架，不依赖PDF跳页。工具栏另有返回书架按钮。
 +- 「返回对应原页」是独立操作：立即退出重排，再请求原版跳页；失败仅toast提示，不允许跳页卡死阻止用户退出。
 +- 原文件页码含封面；示例书 PDF 第17页对应印刷第16页。
-+- 本轮不连续拼接跨页段落、不生成新书、不修改 PDF，不映射重排文字上的笔记，不接入听书；仍可在原版使用已有功能。
++- 底部「朗读」从当前物理页开始，复用现有听书引擎/语音设置；暂停、继续、停止保持可触达。当前真实朗读词/句高亮，自动滚动并跟随进入下一物理页。
++- 手动翻页、滑动、鼠标滚轮或导航键暂停视觉跟随，不暂停声音；「回到正在朗读」恢复跟随。切回 PDF 不停止音频，返回书架沿用原有退出行为。
++- 高亮通过控制器实际 Range 与 PDF 字符流来源映射，不按全文重复句搜索、不模拟逐字时间戳；语音引擎无词边界则以句子标示，文字层经转换不一致时不冒险高亮。听书仍采用原有 PDF 文字层顺序，复杂版式不保证与视觉重排顺序一致。
++- 不连续拼接跨页段落、不生成新书、不修改 PDF，不映射重排文字上的笔记；原版仍可使用已有功能。
 +- 同一App会话内记忆每本书重排页码、字号与行距（sessionStorage，不含正文）；再次打开重排恢复。缓存仍仅打开期间有效，不保存段内滚动偏移，不与原版阅读进度强行同步。
 +
 +## 范围
@@ -2771,6 +4154,14 @@ index 0000000..c66099a
 +## 尚需真机验证
 +
 +APK产出后需检验：首次打开、Android返回键、长页滚动、连续快速切页、输入页码、返回对应原页、横屏安全区、主题和电纸书。单元测试和样本检查不等于原生设备验收。
++
++## 默认重排与听书（本轮）
++
++- 等待原视图 inited 后每次新打开 PDF 默认重排，原版/重排双向顶部直接切换；手动重开重排以当前原版页优先，默认进入恢复会话页。
++- 来源映射保留 PDF 提取项字符偏移，视觉重排不会丢失重复句身份。控制器在本地 position 事件附实际 Range，旧版其他消费者仍保留 CFI 语义。
++- 本轮直接相关 15 文件 308 tests 通过；包含真实 sample-alice.pdf 三页来源映射、foliate 句标记、跟随暂停/恢复、异步提取、停止启动竞态、页0和原版听书生命周期。全项目 TypeScript 5.9 通过；7个实现文件 Biome check通过。
++- 扩大到全部 components 的额外运行125文件/1157 tests通过，但8个worker启动超时，故不将其算作完整全量通过；随后用maxWorkers=2重跑上述直接相关集全部通过。
++- 中文412×915 WebView静态CSS夹具无横向溢出，顶部/底部按钮高度44px。夹具不等同实际APK端到端；仍需用户设备上的声画同步、跨页、长页、语音引擎验证。
 diff --git a/docs/reading-polish.md b/docs/reading-polish.md
 new file mode 100644
 index 0000000..0f03691
