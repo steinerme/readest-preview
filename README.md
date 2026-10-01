@@ -30,6 +30,8 @@ PDFs default to text reflow once the original reader has restored its location. 
 
 Reflow now exposes the existing read-aloud transport, highlights real spoken word/sentence ranges, scrolls to the active range and follows physical page changes. Manual scrolling/page navigation suspends visual following; Return to Current Speech resumes it. Switching to the original PDF does not stop audio. Range provenance is mapped from the original PDF item stream, not guessed from repeated sentence text. Engines without word boundaries use sentence highlighting; transformed/mismatched text refuses uncertain highlights. Listening still follows the original PDF text-layer order, so complex visual layouts remain unsupported.
 
+The post-20005 fix verifies PDF navigation using fixed-layout's actual physical `index`, rather than its nonexistent `primaryIndex`, and places listening/page controls in a separate flow-layout footer. The scrollable article receives only the remaining height: footer wrapping on narrow screens never overlays body text. 315 targeted tests and the project typecheck pass locally; real WebView CSS checks cover phone/narrow/landscape dimensions, but the updated APK still needs device acceptance. An intermittent visual-follow detachment observed in the prior device test is not addressed by these two fixes.
+
 The user's sample PDFs and extracted text are never published here. The existing preview signing key is reused for in-place preview updates.
 
 ## Scope

@@ -219,10 +219,10 @@ index f87ff3c..74afc29 100644
  describe('HeaderBar sidebar toggle', () => {
 diff --git a/apps/readest-app/src/__tests__/components/PdfReflowDialog.test.tsx b/apps/readest-app/src/__tests__/components/PdfReflowDialog.test.tsx
 new file mode 100644
-index 0000000..4691c7f
+index 0000000..9208982
 --- /dev/null
 +++ b/apps/readest-app/src/__tests__/components/PdfReflowDialog.test.tsx
-@@ -0,0 +1,327 @@
+@@ -0,0 +1,373 @@
 +import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 +import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 +import PdfReflowDialog from '@/app/reader/components/PdfReflowDialog';
@@ -264,9 +264,10 @@ index 0000000..4691c7f
 +  useReaderStore: () => ({
 +    getView: () => ({
 +      renderer: {
-+        get primaryIndex() {
++        get index() {
 +          return mocks.index;
 +        },
++        getContents: () => [{ index: mocks.index }],
 +      },
 +      goTo: mocks.goTo,
 +    }),
@@ -550,6 +551,51 @@ index 0000000..4691c7f
 +    eventDispatcher.off('tts-stop', stopped);
 +  });
 +});
++
++describe('PDF return navigation verification', () => {
++  it('does not emit a failure toast when fixed-layout index reaches page zero', async () => {
++    const toast = vi.fn();
++    eventDispatcher.on('toast', toast);
++    try {
++      render(<PdfReflowDialog bookKey='pdf-1' initialPage={0} onClose={vi.fn()} />);
++      await screen.findByText('第一页正文。');
++      fireEvent.click(screen.getByLabelText('Show Reflow Controls'));
++      await act(async () => {
++        fireEvent.click(screen.getByText('Switch to PDF'));
++      });
++      expect(mocks.goTo).toHaveBeenCalledWith(0);
++      expect(toast).not.toHaveBeenCalled();
++    } finally {
++      eventDispatcher.off('toast', toast);
++    }
++  });
++  it('still reports an actual failed navigation when the active PDF page remains different', async () => {
++    const toast = vi.fn();
++    eventDispatcher.on('toast', toast);
++    try {
++      mocks.goTo.mockResolvedValue(undefined);
++      render(<PdfReflowDialog bookKey='pdf-1' initialPage={1} onClose={vi.fn()} />);
++      await screen.findByText('第二页正文。');
++      fireEvent.click(screen.getByLabelText('Show Reflow Controls'));
++      await act(async () => {
++        fireEvent.click(screen.getByText('Switch to PDF'));
++      });
++      expect(toast).toHaveBeenCalledOnce();
++    } finally {
++      eventDispatcher.off('toast', toast);
++    }
++  });
++  it('keeps transport and page controls together outside the scrolling article', async () => {
++    const { container } = render(<PdfReflowDialog bookKey='pdf-1' onClose={vi.fn()} />);
++    await screen.findByText('第一页正文。');
++    const dock = container.querySelector('footer.pdf-reflow-dock')!;
++    expect(dock.contains(screen.getByRole('button', { name: 'Read Aloud' }))).toBe(true);
++    expect(dock.contains(screen.getByLabelText('Show Reflow Controls'))).toBe(true);
++    expect(container.querySelector('article')!.contains(dock)).toBe(false);
++    fireEvent.click(screen.getByLabelText('Show Reflow Controls'));
++    expect(dock.contains(screen.getByLabelText('Original PDF Page'))).toBe(true);
++  });
++});
 diff --git a/apps/readest-app/src/__tests__/components/ReadingPanels.test.tsx b/apps/readest-app/src/__tests__/components/ReadingPanels.test.tsx
 new file mode 100644
 index 0000000..512b45b
@@ -644,7 +690,7 @@ index 0000000..512b45b
 +});
 diff --git a/apps/readest-app/src/__tests__/components/pdf-default-reflow.test.tsx b/apps/readest-app/src/__tests__/components/pdf-default-reflow.test.tsx
 new file mode 100644
-index 0000000..79484de
+index 0000000..d290638
 --- /dev/null
 +++ b/apps/readest-app/src/__tests__/components/pdf-default-reflow.test.tsx
 @@ -0,0 +1,146 @@
@@ -659,7 +705,7 @@ index 0000000..79484de
 +const view = {
 +  renderer: {
 +    getContents: () => [],
-+    get primaryIndex() {
++    get index() {
 +      return page;
 +    },
 +  },
@@ -1648,6 +1694,38 @@ index 0000000..a3eec2d
 +    expect(markedText(f, r)).toEqual(['Second.']);
 +  });
 +});
+diff --git a/apps/readest-app/src/__tests__/utils/pdfRendererPage.test.ts b/apps/readest-app/src/__tests__/utils/pdfRendererPage.test.ts
+new file mode 100644
+index 0000000..9d555c6
+--- /dev/null
++++ b/apps/readest-app/src/__tests__/utils/pdfRendererPage.test.ts
+@@ -0,0 +1,26 @@
++import { describe, expect, it } from 'vitest';
++import { getPdfRendererPage, isPdfPageVisible } from '@/utils/pdfRendererPage';
++describe('PDF physical section index', () => {
++  it('uses fixed-layout index including zero without primaryIndex', () => {
++    expect(getPdfRendererPage({ index: 0 })).toBe(0);
++    expect(isPdfPageVisible({ index: 0 }, 0)).toBe(true);
++    expect(getPdfRendererPage({ index: 42 })).toBe(42);
++    expect(isPdfPageVisible({ index: 42 }, 42)).toBe(true);
++  });
++  it('does not accept a prefetched page when the active index says otherwise', () => {
++    expect(isPdfPageVisible({ index: 1, getContents: () => [{ index: 0 }, { index: 1 }] }, 0)).toBe(
++      false,
++    );
++  });
++  it('supports legacy primaryIndex and fallback visible contents', () => {
++    expect(getPdfRendererPage({ primaryIndex: 3 })).toBe(3);
++    expect(isPdfPageVisible({ primaryIndex: 3 }, 3)).toBe(true);
++    expect(getPdfRendererPage({ getContents: () => [{}, { index: 0 }] })).toBe(0);
++    expect(isPdfPageVisible({ getContents: () => [{ index: 0 }, { index: 1 }] }, 1)).toBe(true);
++  });
++  it('rejects missing, non-finite and negative indices', () => {
++    expect(getPdfRendererPage(undefined)).toBeUndefined();
++    expect(getPdfRendererPage({ index: -1, primaryIndex: NaN })).toBeUndefined();
++    expect(isPdfPageVisible({}, 0)).toBe(false);
++  });
++});
 diff --git a/apps/readest-app/src/app/library/components/BookItem.tsx b/apps/readest-app/src/app/library/components/BookItem.tsx
 index d51d285..16d4d45 100644
 --- a/apps/readest-app/src/app/library/components/BookItem.tsx
@@ -1805,19 +1883,20 @@ index 9cedc20..716a88f 100644
                  'placeholder:text-base-content/50 truncate',
                  'focus:outline-hidden focus:ring-0',
 diff --git a/apps/readest-app/src/app/reader/components/HeaderBar.tsx b/apps/readest-app/src/app/reader/components/HeaderBar.tsx
-index 58f1135..c03d56a 100644
+index 58f1135..920edc4 100644
 --- a/apps/readest-app/src/app/reader/components/HeaderBar.tsx
 +++ b/apps/readest-app/src/app/reader/components/HeaderBar.tsx
-@@ -33,6 +33,8 @@ import NotebookToggler from './NotebookToggler';
+@@ -33,6 +33,9 @@ import NotebookToggler from './NotebookToggler';
  import TranslationToggler from './TranslationToggler';
  import ViewMenu from './ViewMenu';
  import SyncInfoDialog from './SyncInfoDialog';
 +import PdfReflowDialog from './PdfReflowDialog';
 +import '@/styles/reader-polish.css';
++import { getPdfRendererPage } from '@/utils/pdfRendererPage';
  
  interface HeaderBarProps {
    bookKey: string;
-@@ -85,8 +87,29 @@ const HeaderBar: React.FC<HeaderBarProps> = ({
+@@ -85,8 +88,29 @@ const HeaderBar: React.FC<HeaderBarProps> = ({
  
    const [isDropdownOpen, setIsDropdownOpen] = useState(false);
    const [isMetaHashDialogOpen, setIsMetaHashDialogOpen] = useState(false);
@@ -1839,7 +1918,7 @@ index 58f1135..c03d56a 100644
 +
 +  const openPdfReflow = () => {
 +    defaultReflowBook.current = bookKey;
-+    setReflowInitialPage(view?.renderer.primaryIndex);
++    setReflowInitialPage(getPdfRendererPage(view?.renderer));
 +    setIsDropdownOpen(false);
 +    onDropdownOpenChange?.(false);
 +    setIsPdfReflowOpen(true);
@@ -1847,7 +1926,7 @@ index 58f1135..c03d56a 100644
    const iconSize18 = useResponsiveSize(18);
  
    const docs = view?.renderer.getContents() ?? [];
-@@ -221,9 +244,12 @@ const HeaderBar: React.FC<HeaderBarProps> = ({
+@@ -221,9 +245,12 @@ const HeaderBar: React.FC<HeaderBarProps> = ({
          ref={headerRef}
          role='banner'
          aria-label={_('Header Bar')}
@@ -1862,7 +1941,7 @@ index 58f1135..c03d56a 100644
            trafficLightInHeader ? 'pl-20' : isSideBarVisible ? 'ps-4' : 'ps-4 sm:ps-1.5',
            appService?.hasRoundedWindow && 'rounded-window-top-right',
            !isSideBarVisible && appService?.hasRoundedWindow && 'rounded-window-top-left',
-@@ -269,6 +295,16 @@ const HeaderBar: React.FC<HeaderBarProps> = ({
+@@ -269,6 +296,16 @@ const HeaderBar: React.FC<HeaderBarProps> = ({
              >
                <VscLibrary size={iconSize18} className='fill-base-content' />
              </button>
@@ -1879,7 +1958,7 @@ index 58f1135..c03d56a 100644
              <BookmarkToggler bookKey={bookKey} />
              <TranslationToggler bookKey={bookKey} />
            </div>
-@@ -343,8 +379,20 @@ const HeaderBar: React.FC<HeaderBarProps> = ({
+@@ -343,8 +380,20 @@ const HeaderBar: React.FC<HeaderBarProps> = ({
              <ViewMenu
                bookKey={bookKey}
                onShowMetaHashDialog={() => setIsMetaHashDialogOpen(true)}
@@ -1902,10 +1981,10 @@ index 58f1135..c03d56a 100644
                <SyncInfoDialog
 diff --git a/apps/readest-app/src/app/reader/components/PdfReflowDialog.tsx b/apps/readest-app/src/app/reader/components/PdfReflowDialog.tsx
 new file mode 100644
-index 0000000..47a5edd
+index 0000000..77b3b99
 --- /dev/null
 +++ b/apps/readest-app/src/app/reader/components/PdfReflowDialog.tsx
-@@ -0,0 +1,413 @@
+@@ -0,0 +1,416 @@
 +import { useEffect, useRef, useState } from 'react';
 +import { useThemeStore } from '@/store/themeStore';
 +import { eventDispatcher } from '@/utils/event';
@@ -1917,6 +1996,7 @@ index 0000000..47a5edd
 +import { reflowPdfText, type ReflowPage } from '@/utils/pdfReflow';
 +import '@/styles/pdf-reflow.css';
 +import { readReflowSession, writeReflowSession } from '@/utils/pdfReflowSession';
++import { getPdfRendererPage, isPdfPageVisible } from '@/utils/pdfRendererPage';
 +
 +interface Props {
 +  bookKey: string;
@@ -1953,7 +2033,7 @@ index 0000000..47a5edd
 +      return Math.max(0, Math.min(count - 1, initialPage));
 +    if (saved) return saved.page;
 +    const index =
-+      getView(bookKey)?.renderer.primaryIndex ?? getProgress(bookKey)?.section.current ?? 0;
++      getPdfRendererPage(getView(bookKey)?.renderer) ?? getProgress(bookKey)?.section.current ?? 0;
 +    return Math.max(0, Math.min(count - 1, Number.isFinite(index) ? index : 0));
 +  });
 +  const [pageInput, setPageInput] = useState(String(page + 1));
@@ -2035,7 +2115,7 @@ index 0000000..47a5edd
 +      void Promise.resolve()
 +        .then(async () => {
 +          await view.goTo(page);
-+          if (view.renderer.primaryIndex !== page) throw new Error('PDF navigation failed');
++          if (!isPdfPageVisible(view.renderer, page)) throw new Error('PDF navigation failed');
 +        })
 +        .catch(() =>
 +          eventDispatcher.dispatch('toast', {
@@ -2242,78 +2322,80 @@ index 0000000..47a5edd
 +          </button>
 +        </nav>
 +      </article>
-+      <div className='pdf-reflow-tts' role='group' aria-label={_('Read Aloud')}>
++      <footer className='pdf-reflow-dock' aria-label={_('Page Navigation')}>
++        <div className='pdf-reflow-tts' role='group' aria-label={_('Read Aloud')}>
++          <button
++            type='button'
++            disabled={tts.pending || !count}
++            onClick={() => void tts.toggle()}
++            aria-label={
++              tts.state === 'playing'
++                ? _('Pause')
++                : tts.state === 'paused'
++                  ? _('Resume')
++                  : _('Read Aloud')
++            }
++          >
++            {tts.pending
++              ? _('Loading…')
++              : tts.state === 'playing'
++                ? _('Pause')
++                : tts.state === 'paused'
++                  ? _('Resume')
++                  : _('Read Aloud')}
++          </button>
++          {(tts.state !== 'stopped' || tts.pending) && (
++            <button type='button' onClick={tts.stop}>
++              {_('Stop')}
++            </button>
++          )}
++          {!tts.following && (tts.state !== 'stopped' || tts.pending) && (
++            <button type='button' onClick={tts.returnToSpeech}>
++              {_('Return to Current Speech')}
++            </button>
++          )}
++        </div>
 +        <button
++          className='pdf-reflow-reveal'
 +          type='button'
-+          disabled={tts.pending || !count}
-+          onClick={() => void tts.toggle()}
-+          aria-label={
-+            tts.state === 'playing'
-+              ? _('Pause')
-+              : tts.state === 'paused'
-+                ? _('Resume')
-+                : _('Read Aloud')
-+          }
++          hidden={chromeVisible}
++          aria-label={_('Show Reflow Controls')}
++          onClick={() => setChromeVisible(true)}
 +        >
-+          {tts.pending
-+            ? _('Loading…')
-+            : tts.state === 'playing'
-+              ? _('Pause')
-+              : tts.state === 'paused'
-+                ? _('Resume')
-+                : _('Read Aloud')}
++          {page + 1} / {count} · Aa
 +        </button>
-+        {(tts.state !== 'stopped' || tts.pending) && (
-+          <button type='button' onClick={tts.stop}>
-+            {_('Stop')}
++        <form
++          data-visible={chromeVisible}
++          aria-hidden={!chromeVisible}
++          inert={!chromeVisible}
++          className='pdf-reflow-pagination'
++          onSubmit={(e) => {
++            e.preventDefault();
++            goPage(Number(pageInput) - 1);
++          }}
++        >
++          <button type='button' disabled={page <= 0} onClick={() => goPage(page - 1)}>
++            {_('Previous Page')}
 +          </button>
-+        )}
-+        {!tts.following && (tts.state !== 'stopped' || tts.pending) && (
-+          <button type='button' onClick={tts.returnToSpeech}>
-+            {_('Return to Current Speech')}
++          <label>
++            <span className='sr-only'>{_('Original PDF Page')}</span>
++            <input
++              aria-label={_('Original PDF Page')}
++              inputMode='numeric'
++              type='number'
++              min={1}
++              max={count}
++              value={pageInput}
++              onChange={(e) => setPageInput(e.target.value)}
++            />
++            <span> / {count}</span>
++          </label>
++          <button type='submit'>{_('Go')}</button>
++          <button type='button' disabled={page >= count - 1} onClick={() => goPage(page + 1)}>
++            {_('Next Page')}
 +          </button>
-+        )}
-+      </div>
-+      <button
-+        className='pdf-reflow-reveal'
-+        type='button'
-+        hidden={chromeVisible}
-+        aria-label={_('Show Reflow Controls')}
-+        onClick={() => setChromeVisible(true)}
-+      >
-+        {page + 1} / {count} · Aa
-+      </button>
-+      <form
-+        data-visible={chromeVisible}
-+        aria-hidden={!chromeVisible}
-+        inert={!chromeVisible}
-+        className='pdf-reflow-pagination'
-+        onSubmit={(e) => {
-+          e.preventDefault();
-+          goPage(Number(pageInput) - 1);
-+        }}
-+      >
-+        <button type='button' disabled={page <= 0} onClick={() => goPage(page - 1)}>
-+          {_('Previous Page')}
-+        </button>
-+        <label>
-+          <span className='sr-only'>{_('Original PDF Page')}</span>
-+          <input
-+            aria-label={_('Original PDF Page')}
-+            inputMode='numeric'
-+            type='number'
-+            min={1}
-+            max={count}
-+            value={pageInput}
-+            onChange={(e) => setPageInput(e.target.value)}
-+          />
-+          <span> / {count}</span>
-+        </label>
-+        <button type='submit'>{_('Go')}</button>
-+        <button type='button' disabled={page >= count - 1} onClick={() => goPage(page + 1)}>
-+          {_('Next Page')}
-+        </button>
-+      </form>
++        </form>
++      </footer>
 +    </div>
 +  );
 +};
@@ -3338,14 +3420,16 @@ index 0000000..9961e02
 +}
 diff --git a/apps/readest-app/src/styles/pdf-reflow.css b/apps/readest-app/src/styles/pdf-reflow.css
 new file mode 100644
-index 0000000..aa5c27b
+index 0000000..4f66268
 --- /dev/null
 +++ b/apps/readest-app/src/styles/pdf-reflow.css
-@@ -0,0 +1,232 @@
+@@ -0,0 +1,242 @@
 +.pdf-reflow-reader {
 +  position: absolute;
 +  inset: 0;
 +  overflow: hidden;
++  display: flex;
++  flex-direction: column;
 +  color: var(--color-base-content);
 +  background: var(--color-base-100);
 +  outline: none;
@@ -3412,13 +3496,13 @@ index 0000000..aa5c27b
 +  opacity: 0.7;
 +}
 +.pdf-reflow-page {
-+  height: 100%;
++  flex: 1 1 0;
++  min-height: 0;
 +  width: 100%;
 +  overflow-y: auto;
 +  overscroll-behavior: contain;
 +  touch-action: pan-y;
-+  padding: calc(24px + var(--safe-top)) max(24px, calc((100% - 700px) / 2))
-+    calc(68px + var(--safe-bottom));
++  padding: calc(24px + var(--safe-top)) max(24px, calc((100% - 700px) / 2)) 24px;
 +  overflow-wrap: anywhere;
 +  user-select: text;
 +  -webkit-user-select: text;
@@ -3476,11 +3560,19 @@ index 0000000..aa5c27b
 +  transform: translateY(0);
 +  transition-delay: 0s;
 +}
++.pdf-reflow-dock {
++  flex: 0 0 auto;
++  display: flex;
++  flex-wrap: wrap;
++  align-items: center;
++  justify-content: center;
++  gap: 8px;
++  padding: 8px 12px calc(8px + var(--safe-bottom));
++  border-top: 1px solid var(--color-base-300);
++  background: var(--color-base-100);
++}
 +.pdf-reflow-reveal {
-+  position: absolute;
-+  z-index: 1;
-+  bottom: calc(8px + var(--safe-bottom));
-+  inset-inline-end: 16px;
++  margin-inline-start: auto;
 +  opacity: 0.8;
 +}
 +.pdf-reflow-reveal[hidden] {
@@ -3494,13 +3586,21 @@ index 0000000..aa5c27b
 +  font-size: 13px;
 +  margin-block: 24px;
 +}
-+.pdf-reflow-pagination {
-+  bottom: 0;
-+  transform: translateY(8px);
-+  padding: 10px 14px calc(12px + var(--safe-bottom));
++.pdf-reflow-dock .pdf-reflow-pagination {
++  position: static;
++  display: none;
++  flex: 0 0 100%;
++  opacity: 1;
++  visibility: visible;
++  transform: none;
++  transition: none;
++  padding: 8px 0 0;
 +  border-top: 1px solid var(--color-base-300);
 +  flex-wrap: wrap;
 +  justify-content: center;
++}
++.pdf-reflow-dock .pdf-reflow-pagination[data-visible='true'] {
++  display: flex;
 +}
 +.pdf-reflow-pagination input {
 +  width: 65px;
@@ -3540,23 +3640,15 @@ index 0000000..aa5c27b
 +
 +/* Read-aloud transport stays reachable when the reading chrome is hidden. */
 +.pdf-reflow-tts {
-+  position: absolute;
-+  z-index: 2;
-+  bottom: calc(70px + var(--safe-bottom));
-+  inset-inline: 16px;
 +  display: flex;
 +  flex-wrap: wrap;
 +  justify-content: center;
 +  gap: 6px;
-+  pointer-events: none;
 +}
 +.pdf-reflow-tts button {
 +  pointer-events: auto;
 +  box-shadow: 0 2px 12px rgb(0 0 0 / 0.12);
 +  font-size: 13px;
-+}
-+.pdf-reflow-page {
-+  padding-bottom: calc(136px + var(--safe-bottom));
 +}
 +.pdf-reflow-page mark[data-reflow-tts] {
 +  color: inherit;
@@ -3564,7 +3656,7 @@ index 0000000..aa5c27b
 +  border-radius: 3px;
 +  box-decoration-break: clone;
 +  -webkit-box-decoration-break: clone;
-+  scroll-margin-block: calc(96px + var(--safe-top)) calc(140px + var(--safe-bottom));
++  scroll-margin-block: calc(96px + var(--safe-top)) 24px;
 +}
 +html[data-eink='true'] .pdf-reflow-page mark[data-reflow-tts] {
 +  background: transparent;
@@ -3669,6 +3761,19 @@ index 0000000..99f9587
 +html[data-eink='true'] .reading-panel {
 +  transform: none;
 +}
+diff --git a/apps/readest-app/src/types/view.ts b/apps/readest-app/src/types/view.ts
+index eade071..6b5be9c 100644
+--- a/apps/readest-app/src/types/view.ts
++++ b/apps/readest-app/src/types/view.ts
+@@ -47,6 +47,8 @@ export interface Renderer extends HTMLElement {
+   goTo: (params: { index: number; anchor?: number | RangeAnchor }) => Promise<void>;
+   setStyles?: (css: string) => void;
+   primaryIndex: number;
++  /** fixed-layout physical section index; primaryIndex is not implemented there. */
++  index?: number;
+   getContents: () => { doc: Document; index?: number; overlayer?: unknown }[];
+   scrollToAnchor?: (anchor: number | Range, reason?: string, smooth?: boolean) => void;
+   addEventListener: (
 diff --git a/apps/readest-app/src/utils/dialogMotion.ts b/apps/readest-app/src/utils/dialogMotion.ts
 new file mode 100644
 index 0000000..9a305ab
@@ -4098,12 +4203,42 @@ index 0000000..2062ead
 +    return [];
 +  }
 +}
+diff --git a/apps/readest-app/src/utils/pdfRendererPage.ts b/apps/readest-app/src/utils/pdfRendererPage.ts
+new file mode 100644
+index 0000000..f011f89
+--- /dev/null
++++ b/apps/readest-app/src/utils/pdfRendererPage.ts
+@@ -0,0 +1,24 @@
++interface PdfPageRenderer {
++  /** fixed-layout's physical section index (not the spread index). */
++  index?: number;
++  /** Available on reflowable renderers, absent on fixed-layout. */
++  primaryIndex?: number;
++  getContents?: () => { index?: number }[];
++}
++const valid = (index: unknown): index is number =>
++  typeof index === 'number' && Number.isInteger(index) && index >= 0;
++
++export function getPdfRendererPage(renderer: PdfPageRenderer | undefined): number | undefined {
++  if (!renderer) return undefined;
++  if (valid(renderer.index)) return renderer.index;
++  if (valid(renderer.primaryIndex)) return renderer.primaryIndex;
++  return renderer.getContents?.().find((content) => valid(content.index))?.index;
++}
++
++export function isPdfPageVisible(renderer: PdfPageRenderer, page: number): boolean {
++  // Prefer the active physical index. getContents may include prefetched pages
++  // in scroll mode or both members of a spread, so it is only a fallback.
++  if (valid(renderer.index)) return renderer.index === page;
++  if (valid(renderer.primaryIndex)) return renderer.primaryIndex === page;
++  return renderer.getContents?.().some((content) => content.index === page) ?? false;
++}
 diff --git a/docs/pdf-reflow.md b/docs/pdf-reflow.md
 new file mode 100644
-index 0000000..05b24ff
+index 0000000..2a260ad
 --- /dev/null
 +++ b/docs/pdf-reflow.md
-@@ -0,0 +1,58 @@
+@@ -0,0 +1,66 @@
 +# PDF 文字重排（单栏文字版）
 +
 +## 入口与使用
@@ -4135,7 +4270,7 @@ index 0000000..05b24ff
 +- 坐标从 crop-box 原点归一化；重排函数依据基线与横向位置合并文字、小上标、斜体及中英文换行。
 +- 通过独立原页间距/字体判断段落及小字注释，React 以纯文本渲染，PDF 内容不作为 HTML 执行。
 +- 每次只提取所选原页，内存最多缓存12页，异步请求失效保护避免快速翻页显示旧内容。
-+- 单独的阅读面板不更改原书 CFI、format 或底层 fixed-layout renderer；返回原版用官方 view.goTo(index)，并确认 primaryIndex。
++- 单独的阅读面板不更改原书 CFI、format 或底层 fixed-layout renderer；返回原版用官方 view.goTo(index)，优先以 fixed-layout 的物理 index 确认，不误用该渲染器未实现的 primaryIndex；无活跃 index 时才回退可见内容列表。
 +- `reading-polish.patch` 包含应用全部修改；`foliate-reflow.patch` 必须在锁定的 foliate-js 子模块内另行应用。云端 workflow 已接入，两者缺一不可。
 +
 +## 本地验证
@@ -4162,6 +4297,14 @@ index 0000000..05b24ff
 +- 本轮直接相关 15 文件 308 tests 通过；包含真实 sample-alice.pdf 三页来源映射、foliate 句标记、跟随暂停/恢复、异步提取、停止启动竞态、页0和原版听书生命周期。全项目 TypeScript 5.9 通过；7个实现文件 Biome check通过。
 +- 扩大到全部 components 的额外运行125文件/1157 tests通过，但8个worker启动超时，故不将其算作完整全量通过；随后用maxWorkers=2重跑上述直接相关集全部通过。
 +- 中文412×915 WebView静态CSS夹具无横向溢出，顶部/底部按钮高度44px。夹具不等同实际APK端到端；仍需用户设备上的声画同步、跨页、长页、语音引擎验证。
++
++## 20005 真机反馈后的两项修复
++
++- 修正切回原版误报：统一 getPdfRendererPage/isPdfPageVisible，优先使用 fixed-layout 实际物理 index，兼容 primaryIndex/可见内容回退。仍保留真实拒绝/页码不符错误提示及不等待跳页的退出行为。顶部原版转重排也读取同一物理页接口。
++- 听书、页码和唤出工具栏按钮放入独立 footer flex 区域，article 仅占剩余高度，min-height:0。窄屏换行会增高底部区域而不是覆盖正文。音频传输和跟随状态逻辑未更改。
++- 16相关测试文件315项通过，全项目TypeScript5.9通过，5实现文件Biome通过。PDF组件测试改用真实fixed-layout风格的index（无primaryIndex）；新增页0成功无toast、页不符仍报错、底部容器外置及4页码接口tests。
++- 真实WebView CSS夹具在412×915、320×700、915×412，工具栏显示/隐藏、跟随/脱离12种组合测量：article底边不超过footer顶边，末行完整可滚入视口，按钮均在footer内部，无横向溢出。320宽分页换行亦不覆盖正文。此为实际CSS布局验证，非更新APK真机验收。
++- 本轮只修真机报告第1/3项，第2项非预期跟随暂停未修复；不把这些局部修改宣称为跟随稳定性全面通过。
 diff --git a/docs/reading-polish.md b/docs/reading-polish.md
 new file mode 100644
 index 0000000..0f03691
