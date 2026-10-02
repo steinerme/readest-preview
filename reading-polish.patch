@@ -1137,10 +1137,10 @@ index f87ff3c..fc06662 100644
      const { container } = renderHeader();
 diff --git a/apps/readest-app/src/__tests__/components/PdfReflowDialog.test.tsx b/apps/readest-app/src/__tests__/components/PdfReflowDialog.test.tsx
 new file mode 100644
-index 0000000..f918b7a
+index 0000000..5ecf2f4
 --- /dev/null
 +++ b/apps/readest-app/src/__tests__/components/PdfReflowDialog.test.tsx
-@@ -0,0 +1,506 @@
+@@ -0,0 +1,511 @@
 +import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 +import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 +import PdfReflowDialog from '@/app/reader/components/PdfReflowDialog';
@@ -1150,6 +1150,7 @@ index 0000000..f918b7a
 +
 +const mocks = vi.hoisted(() => ({
 +  pages: [] as Array<{ getReflowText?: () => Promise<unknown> }>,
++  suppressMenu: vi.fn(async () => {}),
 +  index: 0,
 +  goTo: vi.fn(),
 +  hovered: '',
@@ -1158,7 +1159,8 @@ index 0000000..f918b7a
 +  originalDoc: null as Document | null,
 +  notes: [] as import('@/types/book').BookNote[],
 +}));
-+vi.mock('@/context/EnvContext', () => ({ useEnv: () => ({ appService: { isMobile: true } }) }));
++vi.mock('@/context/EnvContext', () => ({ useEnv: () => ({ appService: { isMobile: true, isAndroidApp: true } }) }));
++vi.mock('@/utils/bridge', () => ({ setSelectionSuppressed: mocks.suppressMenu }));
 +vi.mock('@/store/themeStore', () => ({
 +  useThemeStore: () => ({
 +    safeAreaInsets: { top: 24, bottom: 16 },
@@ -1251,6 +1253,9 @@ index 0000000..f918b7a
 +    mocks.originalDoc = rangeFor('第一页正文。').startContainer.ownerDocument;
 +    render(<PdfReflowDialog bookKey='pdf-1' onClose={vi.fn()} />);
 +    const p = await screen.findByText('第一页正文。');
++    fireEvent.pointerDown(p);
++    expect(mocks.suppressMenu).toHaveBeenLastCalledWith({ target: 'menu', suppressed: true });
++    fireEvent.pointerUp(p);
 +    const range = document.createRange();
 +    range.selectNodeContents(p);
 +    window.getSelection()!.removeAllRanges();
@@ -3287,6 +3292,88 @@ index 0000000..ec81eb5
 +    expect(h.setPage).toHaveBeenCalledWith(2);
 +  });
 +});
+diff --git a/apps/readest-app/src/__tests__/hooks/useReflowSelectionMenu.test.tsx b/apps/readest-app/src/__tests__/hooks/useReflowSelectionMenu.test.tsx
+new file mode 100644
+index 0000000..7be548d
+--- /dev/null
++++ b/apps/readest-app/src/__tests__/hooks/useReflowSelectionMenu.test.tsx
+@@ -0,0 +1,76 @@
++import { useRef } from 'react';
++import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
++import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
++import { useReflowSelectionMenu } from '@/app/reader/hooks/useReflowSelectionMenu';
++const set = vi.hoisted(() => vi.fn(async () => {}));
++vi.mock('@/utils/bridge', () => ({ setSelectionSuppressed: set }));
++function Harness({ android = true }: { android?: boolean }) {
++  const ref = useRef<HTMLElement>(null);
++  useReflowSelectionMenu(ref, android);
++  return <><article ref={ref}><p>reader selected text</p></article><input aria-label='search' defaultValue='editable text' /></>;
++}
++function select() {
++  const range = document.createRange(); range.selectNodeContents(screen.getByText('reader selected text'));
++  const selection = window.getSelection()!; selection.removeAllRanges(); selection.addRange(range);
++  fireEvent(document, new Event('selectionchange'));
++  return selection;
++}
++beforeEach(() => { vi.useFakeTimers(); set.mockClear(); window.getSelection()?.removeAllRanges(); });
++afterEach(() => { cleanup(); window.getSelection()?.removeAllRanges(); vi.useRealTimers(); });
++describe('reflow Android system-menu gate', () => {
++  it('arms on pointerdown BEFORE native long press without deleting selection', () => {
++    render(<Harness />); fireEvent.pointerDown(screen.getByText('reader selected text'));
++    expect(set).toHaveBeenLastCalledWith({ target: 'menu', suppressed: true });
++    const selection = select();
++    fireEvent.pointerUp(document);
++    act(() => vi.advanceTimersByTime(200));
++    expect(selection.toString()).toBe('reader selected text');
++    expect(set).toHaveBeenCalledTimes(1);
++  });
++  it('cancelled scroll or a simple tap does not leave input menus disabled', () => {
++    render(<Harness />); fireEvent.pointerDown(screen.getByText('reader selected text'));
++    fireEvent.pointerCancel(document);
++    act(() => vi.advanceTimersByTime(200));
++    expect(set).toHaveBeenLastCalledWith({ target: 'menu', suppressed: false });
++  });
++  it('handles touch fallback and preserves a selection committed after pointercancel', () => {
++    render(<Harness />); fireEvent.touchStart(screen.getByText('reader selected text'));
++    fireEvent.pointerCancel(document); const selection = select();
++    act(() => vi.advanceTimersByTime(200));
++    expect(selection.toString()).toBe('reader selected text');
++    expect(set).toHaveBeenLastCalledWith({ target: 'menu', suppressed: true });
++  });
++  it('cancels article context menu but not editable menu', () => {
++    render(<Harness />);
++    const event = new MouseEvent('contextmenu', { bubbles: true, cancelable: true });
++    fireEvent(screen.getByText('reader selected text'), event); expect(event.defaultPrevented).toBe(true);
++    const inputEvent = new MouseEvent('contextmenu', { bubbles: true, cancelable: true });
++    fireEvent(screen.getByRole('textbox'), inputEvent); expect(inputEvent.defaultPrevented).toBe(false);
++  });
++  it('focus on editable input releases the native gate even if reader selection remains', () => {
++    render(<Harness />); select(); fireEvent.focusIn(screen.getByRole('textbox'));
++    expect(set).toHaveBeenLastCalledWith({ target: 'menu', suppressed: false });
++  });
++  it('clear selection releases menu suppression immediately', () => {
++    render(<Harness />); select(); window.getSelection()?.removeAllRanges();
++    fireEvent(document, new Event('selectionchange'));
++    expect(set).toHaveBeenLastCalledWith({ target: 'menu', suppressed: false });
++  });
++  it('selection outside article never suppresses system menu', () => {
++    render(<Harness />);
++    const outside = document.createElement('p'); outside.textContent = 'outside'; document.body.append(outside);
++    const range = document.createRange(); range.selectNodeContents(outside); window.getSelection()?.addRange(range);
++    fireEvent(document, new Event('selectionchange')); expect(set).not.toHaveBeenCalled(); outside.remove();
++  });
++  it('unmount restores native menu without clearing selected text', () => {
++    const result = render(<Harness />); fireEvent.pointerDown(screen.getByText('reader selected text'));
++    result.unmount(); expect(set).toHaveBeenLastCalledWith({ target: 'menu', suppressed: false });
++    act(() => vi.advanceTimersByTime(1000)); expect(set).toHaveBeenCalledTimes(2);
++  });
++  it('web and other platforms retain native context-menu behavior', () => {
++    render(<Harness android={false} />); fireEvent.pointerDown(screen.getByText('reader selected text')); select();
++    const event = new MouseEvent('contextmenu', { bubbles: true, cancelable: true });
++    fireEvent(screen.getByText('reader selected text'), event);
++    expect(event.defaultPrevented).toBe(false); expect(set).not.toHaveBeenCalled();
++  });
++});
 diff --git a/apps/readest-app/src/__tests__/hooks/useTTSControl.test.tsx b/apps/readest-app/src/__tests__/hooks/useTTSControl.test.tsx
 index 0ec1919..389d90f 100644
 --- a/apps/readest-app/src/__tests__/hooks/useTTSControl.test.tsx
@@ -4314,10 +4401,10 @@ index 58f1135..e44cada 100644
                <SyncInfoDialog
 diff --git a/apps/readest-app/src/app/reader/components/PdfReflowDialog.tsx b/apps/readest-app/src/app/reader/components/PdfReflowDialog.tsx
 new file mode 100644
-index 0000000..358f58d
+index 0000000..64f34a1
 --- /dev/null
 +++ b/apps/readest-app/src/app/reader/components/PdfReflowDialog.tsx
-@@ -0,0 +1,654 @@
+@@ -0,0 +1,656 @@
 +import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 +import { useTTSPlayerHostStore } from '@/store/ttsPlayerHostStore';
 +import { useThemeStore } from '@/store/themeStore';
@@ -4329,6 +4416,7 @@ index 0000000..358f58d
 +import { useSettingsStore } from '@/store/settingsStore';
 +import { useEnv } from '@/context/EnvContext';
 +import { usePdfReflowTTS } from '../hooks/usePdfReflowTTS';
++import { useReflowSelectionMenu } from '../hooks/useReflowSelectionMenu';
 +import { useBookDataStore } from '@/store/bookDataStore';
 +import { useReaderStore } from '@/store/readerStore';
 +import { useTranslation } from '@/hooks/useTranslation';
@@ -4403,6 +4491,7 @@ index 0000000..358f58d
 +  const [error, setError] = useState(false);
 +
 +  const scrollRef = useRef<HTMLElement>(null);
++  useReflowSelectionMenu(scrollRef, !!appService?.isAndroidApp);
 +  const citationRef = useRef<{ cfi: string; page: number; range?: Range } | null>(null);
 +  const resultPageRef = useRef(-1);
 +  const [citationEpoch, setCitationEpoch] = useState(0);
@@ -6873,6 +6962,115 @@ index 0000000..2d39868
 +      if (previous?.isConnected) previous.focus();
 +    };
 +  }, [root, appService?.isAndroidApp, acquireBackKeyInterception, releaseBackKeyInterception]);
++}
+diff --git a/apps/readest-app/src/app/reader/hooks/useReflowSelectionMenu.ts b/apps/readest-app/src/app/reader/hooks/useReflowSelectionMenu.ts
+new file mode 100644
+index 0000000..48c2d9e
+--- /dev/null
++++ b/apps/readest-app/src/app/reader/hooks/useReflowSelectionMenu.ts
+@@ -0,0 +1,103 @@
++import { useEffect, type RefObject } from 'react';
++import { setSelectionSuppressed } from '@/utils/bridge';
++
++/** Android's floating menu is outside WebView stacking contexts. Arm before
++ * native long-press starts; never clear the DOM selection or its drag handles.
++ * Scope to this reading article, not settings/search/editable inputs. */
++export function useReflowSelectionMenu(
++  articleRef: RefObject<HTMLElement | null>,
++  android: boolean,
++) {
++  useEffect(() => {
++    const article = articleRef.current;
++    if (!android || !article) return;
++    const doc = article.ownerDocument;
++    let enabled = false;
++    let holding = false;
++    let timer: ReturnType<typeof setTimeout> | undefined;
++    let active = true;
++    const set = (next: boolean) => {
++      if (enabled === next) return;
++      enabled = next;
++      void setSelectionSuppressed({ target: 'menu', suppressed: next }).catch(() => {
++        // Let a later event retry after a transient native-bridge failure.
++        if (active && enabled === next) enabled = !next;
++      });
++    };
++    const editable = (node: EventTarget | null) =>
++      node instanceof Element &&
++      !!node.closest('input, textarea, [contenteditable=""], [contenteditable="true"]');
++    const selected = () => {
++      const selection = doc.getSelection();
++      return (
++        !!selection?.rangeCount &&
++        !selection.isCollapsed &&
++        article.contains(selection.anchorNode) &&
++        article.contains(selection.focusNode)
++      );
++    };
++    const sync = () => {
++      clearTimeout(timer);
++      if (selected()) set(true);
++      else if (!holding) set(false);
++    };
++    const down = (event: Event) => {
++      clearTimeout(timer);
++      if (editable(event.target)) {
++        holding = false;
++        set(false);
++        return;
++      }
++      holding = true;
++      set(true);
++    };
++    const up = () => {
++      holding = false;
++      clearTimeout(timer);
++      // Chromium may commit long-press selection just after pointercancel/up.
++      timer = setTimeout(sync, 200);
++    };
++    const context = (event: Event) => {
++      if (editable(event.target)) return;
++      set(true);
++      event.preventDefault();
++      event.stopPropagation();
++    };
++    const focus = (event: Event) => {
++      if (editable(event.target)) {
++        clearTimeout(timer);
++        holding = false;
++        set(false);
++      } else sync();
++    };
++    const change = () => {
++      if (editable(doc.activeElement)) set(false);
++      else sync();
++    };
++    article.addEventListener('pointerdown', down, true);
++    article.addEventListener('touchstart', down, { capture: true, passive: true });
++    article.addEventListener('contextmenu', context, true);
++    doc.addEventListener('pointerup', up, true);
++    doc.addEventListener('pointercancel', up, true);
++    doc.addEventListener('touchend', up, true);
++    doc.addEventListener('touchcancel', up, true);
++    doc.addEventListener('selectionchange', change);
++    doc.addEventListener('focusin', focus, true);
++    sync();
++    return () => {
++      active = false;
++      clearTimeout(timer);
++      article.removeEventListener('pointerdown', down, true);
++      article.removeEventListener('touchstart', down, true);
++      article.removeEventListener('contextmenu', context, true);
++      doc.removeEventListener('pointerup', up, true);
++      doc.removeEventListener('pointercancel', up, true);
++      doc.removeEventListener('touchend', up, true);
++      doc.removeEventListener('touchcancel', up, true);
++      doc.removeEventListener('selectionchange', change);
++      doc.removeEventListener('focusin', focus, true);
++      if (enabled)
++        void setSelectionSuppressed({ target: 'menu', suppressed: false }).catch(() => {});
++    };
++  }, [articleRef, android]);
 +}
 diff --git a/apps/readest-app/src/app/reader/hooks/useTTSControl.ts b/apps/readest-app/src/app/reader/hooks/useTTSControl.ts
 index 9947379..855fea5 100644
