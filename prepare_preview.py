@@ -3,9 +3,26 @@ from pathlib import Path
 import json
 import os
 import xml.etree.ElementTree as ET
+import shutil
 
 root = Path('source/apps/readest-app')
 android = root / 'src-tauri/gen/android'
+# android init + git restore can replace launcher XML or retain upstream
+# monochrome assets. Copy the complete generated icon set AFTER restore.
+shutil.copytree(root / 'src-tauri/icons/android', android / 'app/src/main/res', dirs_exist_ok=True)
+# Do not ship an old Readest-themed monochrome icon under Android 13+.
+icon_xml = android / 'app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml'
+icon_tree = ET.parse(icon_xml)
+for child in list(icon_tree.getroot()):
+    if child.tag == 'monochrome':
+        icon_tree.getroot().remove(child)
+icon_tree.write(icon_xml, encoding='utf-8', xml_declaration=True)
+# In-app/PWA icons use the same full square illustration.
+from PIL import Image
+image = Image.open('branding/app-icon.png')
+for name, size in [('icon.png', 512), ('icon-tiny.png', 32), ('apple-touch-icon.png', 180)]:
+    image.resize((size, size), Image.Resampling.LANCZOS).save(root / 'public' / name)
+image.save(root / 'public/favicon.ico', sizes=[(16, 16), (32, 32), (48, 48)])
 gradle = android / 'app/build.gradle.kts'
 text = gradle.read_text()
 old = 'applicationId = "com.bilingify.readest"'
