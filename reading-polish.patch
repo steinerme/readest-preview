@@ -1,3 +1,15 @@
+diff --git a/apps/readest-app/package.json b/apps/readest-app/package.json
+index 8468f01..0cc5af0 100644
+--- a/apps/readest-app/package.json
++++ b/apps/readest-app/package.json
+@@ -98,6 +98,7 @@
+     "worktree:rm": "pnpm exec tsx scripts/worktree-rm.ts"
+   },
+   "dependencies": {
++    "@ai-sdk/openai": "^3.0.123",
+     "@ai-sdk/openai-compatible": "^2.0.48",
+     "@ai-sdk/react": "^3.0.49",
+     "@assistant-ui/react": "0.11.58",
 diff --git a/apps/readest-app/public/locales/zh-CN/translation.json b/apps/readest-app/public/locales/zh-CN/translation.json
 index 59cd398..079026b 100644
 --- a/apps/readest-app/public/locales/zh-CN/translation.json
@@ -29,6 +41,159 @@ index 59cd398..079026b 100644
 +  "Switch to PDF": "切换为 PDF",
 +  "Return to Current Speech": "回到正在朗读"
  }
+diff --git a/apps/readest-app/src/__tests__/ai/codex-auth.test.ts b/apps/readest-app/src/__tests__/ai/codex-auth.test.ts
+new file mode 100644
+index 0000000..d80721c
+--- /dev/null
++++ b/apps/readest-app/src/__tests__/ai/codex-auth.test.ts
+@@ -0,0 +1,81 @@
++import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
++const mocks = vi.hoisted(() => ({ fetch: vi.fn(), get: vi.fn(), set: vi.fn(), clear: vi.fn(), native: vi.fn(() => true) }));
++vi.mock('@/utils/bridge', () => ({ getSecureItem: mocks.get, setSecureItem: mocks.set, clearSecureItem: mocks.clear }));
++vi.mock('@/services/environment', () => ({ isTauriAppPlatform: mocks.native }));
++vi.mock('@/services/ai/utils/httpFetch', () => ({ getAIFetch: () => mocks.fetch }));
++import { codexCredentials, codexSignedIn, startCodexLogin, finishCodexLogin, logoutCodex } from '@/services/ai/codexAuth';
++const jwt = `header.${btoa(JSON.stringify({ 'https://api.openai.com/auth': { chatgpt_account_id: 'account-test' } }))}.signature`;
++const tokens = { access_token: jwt, refresh_token: 'test-refresh', expires_at: Date.now() + 3600000, account_id: 'account-test' };
++const ok = (data: object) => ({ ok: true, status: 200, json: async () => data });
++beforeEach(() => { vi.clearAllMocks(); mocks.native.mockReturnValue(true); mocks.get.mockResolvedValue({}); mocks.set.mockResolvedValue({ success: true }); mocks.clear.mockResolvedValue({ success: true }); });
++afterEach(() => vi.useRealTimers());
++describe('Codex device OAuth', () => {
++  it('does not contact OAuth simply checking saved status', async () => {
++    expect(await codexSignedIn()).toBe(false); expect(mocks.fetch).not.toHaveBeenCalled();
++  });
++  it('rejects web storage rather than falling back to localStorage', async () => {
++    mocks.native.mockReturnValue(false);
++    await expect(codexSignedIn()).rejects.toThrow('原生应用'); expect(mocks.get).not.toHaveBeenCalled();
++  });
++  it('requests public client device code and honors minimum polling interval', async () => {
++    mocks.fetch.mockResolvedValue(ok({ user_code: 'ABCD-EFGH', device_auth_id: 'test-device', interval: '1' }));
++    const result = await startCodexLogin(new AbortController().signal);
++    expect(result.interval).toBe(3);
++    const [url, init] = mocks.fetch.mock.calls[0]!;
++    expect(url).toBe('https://auth.openai.com/api/accounts/deviceauth/usercode');
++    expect(JSON.parse(init.body)).toEqual({ client_id: 'app_EMoamEEZ73f0CkXaXp7hrann' });
++    expect(init.redirect).toBe('error');
++    expect(init.maxRedirections).toBe(0);
++  });
++  it('fails once on 429 without automated repeated login', async () => {
++    mocks.fetch.mockResolvedValue({ ok: false, status: 429 });
++    await expect(startCodexLogin(new AbortController().signal)).rejects.toThrow('429');
++    expect(mocks.fetch).toHaveBeenCalledTimes(1);
++  });
++  it('polls pending then exchanges PKCE and saves only to keyed secure store', async () => {
++    vi.useFakeTimers();
++    mocks.fetch.mockResolvedValueOnce({ ok: false, status: 404 })
++      .mockResolvedValueOnce(ok({ authorization_code: 'test-code', code_verifier: 'test-verifier' }))
++      .mockResolvedValueOnce(ok({ access_token: jwt, refresh_token: 'test-refresh', expires_in: 3600 }));
++    const promise = finishCodexLogin({ user_code: 'ABCD', device_auth_id: 'device', interval: 3, expires_at: Date.now() + 900000 }, new AbortController().signal);
++    await vi.advanceTimersByTimeAsync(6000); await promise;
++    expect(mocks.fetch).toHaveBeenCalledTimes(3);
++    const [, exchange] = mocks.fetch.mock.calls[2]!;
++    expect(new URLSearchParams(exchange.body).get('code_verifier')).toBe('test-verifier');
++    expect(new URLSearchParams(exchange.body).get('redirect_uri')).toBe('https://auth.openai.com/deviceauth/callback');
++    const saved = mocks.set.mock.calls[0]![0];
++    expect(saved.key).toBe('readest.ai.codex.oauth.v1');
++    expect(JSON.parse(saved.value).account_id).toBe('account-test');
++  });
++  it('cancels waiting without exchange or secure write', async () => {
++    vi.useFakeTimers(); const controller = new AbortController();
++    const promise = finishCodexLogin({ user_code: 'ABCD', device_auth_id: 'device', interval: 3, expires_at: Date.now() + 900000 }, controller.signal);
++    const assertion = expect(promise).rejects.toBeDefined(); controller.abort(); await assertion;
++    expect(mocks.fetch).not.toHaveBeenCalled(); expect(mocks.set).not.toHaveBeenCalled();
++  });
++  it('shares one refresh and preserves unrotated refresh token', async () => {
++    mocks.get.mockResolvedValue({ value: JSON.stringify({ ...tokens, expires_at: 0 }) });
++    mocks.fetch.mockResolvedValue(ok({ access_token: jwt, expires_in: 3600 }));
++    const result = await Promise.all([codexCredentials(), codexCredentials()]);
++    expect(mocks.fetch).toHaveBeenCalledTimes(1); expect(result[0]!.refresh_token).toBe('test-refresh');
++    expect(mocks.set).toHaveBeenCalledTimes(1);
++  });
++  it('logout clears only the Codex secure namespace', async () => {
++    await logoutCodex(); expect(mocks.clear).toHaveBeenCalledWith({ key: 'readest.ai.codex.oauth.v1' });
++  });
++  it('does not resurrect tokens when logout wins refresh race', async () => {
++    mocks.get.mockResolvedValue({ value: JSON.stringify({ ...tokens, expires_at: 0 }) });
++    let resolve!: (value: unknown) => void;
++    mocks.fetch.mockReturnValue(new Promise(r => { resolve = r; }));
++    const promise = codexCredentials();
++    const assertion = expect(promise).rejects.toThrow('取消');
++    await vi.waitFor(() => expect(mocks.fetch).toHaveBeenCalledTimes(1));
++    await logoutCodex(); resolve(ok({ access_token: jwt })); await assertion;
++    expect(mocks.set).not.toHaveBeenCalled();
++  });
++  it('never includes token exchange response body in errors', async () => {
++    mocks.get.mockResolvedValue({ value: JSON.stringify({ ...tokens, expires_at: 0 }) });
++    mocks.fetch.mockResolvedValue({ ok: false, status: 401, text: async () => 'secret-token-value' });
++    await expect(codexCredentials()).rejects.toThrow('HTTP 401'); expect(mocks.set).not.toHaveBeenCalled();
++  });
++});
+diff --git a/apps/readest-app/src/__tests__/ai/codex-provider.test.ts b/apps/readest-app/src/__tests__/ai/codex-provider.test.ts
+new file mode 100644
+index 0000000..7860e23
+--- /dev/null
++++ b/apps/readest-app/src/__tests__/ai/codex-provider.test.ts
+@@ -0,0 +1,60 @@
++import { beforeEach, describe, expect, it, vi } from 'vitest';
++import { streamText } from 'ai';
++const mocks = vi.hoisted(() => ({ fetch: vi.fn(), credentials: vi.fn(), signedIn: vi.fn() }));
++vi.mock('@/services/ai/codexAuth', () => ({ CODEX_BASE: 'https://chatgpt.com/backend-api/codex', codexCredentials: mocks.credentials, codexSignedIn: mocks.signedIn, codexHttp: mocks.fetch }));
++vi.mock('@/services/ai/utils/httpFetch', () => ({ getAIFetch: () => mocks.fetch }));
++import { CodexProvider, codexFetch, fetchCodexModels } from '@/services/ai/providers/CodexProvider';
++import { DEFAULT_AI_SETTINGS } from '@/services/ai/constants';
++beforeEach(() => { vi.clearAllMocks(); mocks.credentials.mockResolvedValue({ access_token: 'test-token', account_id: 'test-account' }); });
++describe('Codex Responses transport', () => {
++  it('rejects token delivery to other origins', async () => {
++    await expect(codexFetch()('https://evil.example/responses')).rejects.toThrow('拒绝');
++    expect(mocks.credentials).not.toHaveBeenCalled(); expect(mocks.fetch).not.toHaveBeenCalled();
++  });
++  it('sets account identity, store=false and required instructions; removes incompatible fields', async () => {
++    mocks.fetch.mockResolvedValue(new Response(''));
++    await codexFetch()('https://chatgpt.com/backend-api/codex/responses', { method: 'POST', body: JSON.stringify({ input: [{ role: 'developer', content: [{ type: 'input_text', text: 'reading rules' }] }, { role: 'user', content: 'Explain' }], temperature: 0.3, max_output_tokens: 500 }) });
++    const [url, init] = mocks.fetch.mock.calls[0]!;
++    expect(url).toContain('/responses'); expect(init.headers.get('Authorization')).toBe('Bearer test-token');
++    expect(init.headers.get('ChatGPT-Account-ID')).toBe('test-account'); expect(init.redirect).toBe('error');
++    const body = JSON.parse(init.body); expect(body.store).toBe(false); expect(body.stream).toBe(true);
++    expect(body.instructions).toContain('reading rules'); expect(body.input).toHaveLength(1);
++    expect(body).not.toHaveProperty('temperature'); expect(body).not.toHaveProperty('max_output_tokens');
++  });
++  it('reports HTTP failure without surfacing sensitive body or retrying', async () => {
++    mocks.fetch.mockResolvedValue(new Response('echo secret', { status: 401 }));
++    await expect(codexFetch()('https://chatgpt.com/backend-api/codex/responses')).rejects.toThrow('HTTP 401');
++    expect(mocks.fetch).toHaveBeenCalledTimes(1);
++  });
++  it('honors cancellation before loading credentials', async () => {
++    const controller = new AbortController(); controller.abort();
++    await expect(codexFetch()('https://chatgpt.com/backend-api/codex/responses', { signal: controller.signal })).rejects.toBeDefined();
++    expect(mocks.credentials).not.toHaveBeenCalled();
++  });
++  it('fetches models on demand with version and recognizes slug', async () => {
++    mocks.fetch.mockResolvedValue(new Response(JSON.stringify({ models: [{ slug: 'gpt-5.3-codex' }, { id: 'model-two' }] })));
++    expect(await fetchCodexModels()).toEqual(['gpt-5.3-codex', 'model-two']);
++    expect(mocks.fetch.mock.calls[0]![0]).toContain('client_version=');
++  });
++  it('does not pretend Codex provides embedding', () => {
++    const provider = new CodexProvider({ ...DEFAULT_AI_SETTINGS, provider: 'codex' });
++    expect(() => provider.getEmbeddingModel()).toThrow('embedding');
++  });
++  it('real SDK decodes Codex response text SSE on Responses endpoint', async () => {
++    const events = [
++      { type: 'response.created', response: { id: 'resp_test', created_at: 1, model: 'gpt-5.3-codex' } },
++      { type: 'response.output_item.added', output_index: 0, item: { type: 'message', id: 'msg_test', role: 'assistant', content: [] } },
++      { type: 'response.content_part.added', output_index: 0, item_id: 'msg_test', content_index: 0, part: { type: 'output_text', text: '', annotations: [] } },
++      { type: 'response.output_text.delta', item_id: 'msg_test', output_index: 0, content_index: 0, delta: '原文解释 [P1]' },
++      { type: 'response.output_text.done', item_id: 'msg_test', output_index: 0, content_index: 0, text: '原文解释 [P1]' },
++      { type: 'response.completed', response: { id: 'resp_test', created_at: 1, model: 'gpt-5.3-codex', status: 'completed', usage: { input_tokens: 20, output_tokens: 6, total_tokens: 26, output_tokens_details: { reasoning_tokens: 0 }, input_tokens_details: { cached_tokens: 0 } } } },
++    ];
++    mocks.fetch.mockResolvedValue(new Response(events.map(event => `data: ${JSON.stringify(event)}\n\n`).join(''), { headers: { 'Content-Type': 'text/event-stream' } }));
++    const provider = new CodexProvider({ ...DEFAULT_AI_SETTINGS, provider: 'codex' });
++    const result = streamText({ model: provider.getModel(), system: '只解释提供的原文', prompt: '解释这句话', maxRetries: 0 });
++    let text = ''; for await (const chunk of result.textStream) text += chunk;
++    expect(text).toBe('原文解释 [P1]');
++    expect(mocks.fetch.mock.calls[0]![0]).toBe('https://chatgpt.com/backend-api/codex/responses');
++    expect(JSON.parse(mocks.fetch.mock.calls[0]![1].body).instructions).toContain('只解释提供的原文');
++  });
++});
 diff --git a/apps/readest-app/src/__tests__/ai/reading-assistant.test.ts b/apps/readest-app/src/__tests__/ai/reading-assistant.test.ts
 new file mode 100644
 index 0000000..d618ce1
@@ -914,7 +1079,7 @@ index 0000000..180455a
 +  });
 +});
 diff --git a/apps/readest-app/src/__tests__/components/HeaderBar.test.tsx b/apps/readest-app/src/__tests__/components/HeaderBar.test.tsx
-index f87ff3c..74afc29 100644
+index f87ff3c..fc06662 100644
 --- a/apps/readest-app/src/__tests__/components/HeaderBar.test.tsx
 +++ b/apps/readest-app/src/__tests__/components/HeaderBar.test.tsx
 @@ -31,10 +31,11 @@ vi.mock('@/store/themeStore', () => ({
@@ -958,6 +1123,18 @@ index f87ff3c..74afc29 100644
  });
  
  describe('HeaderBar sidebar toggle', () => {
+@@ -142,6 +164,11 @@ describe('HeaderBar font button', () => {
+ });
+ 
+ describe('HeaderBar mobile toolbar stability', () => {
++  it('does not put the AI entry in the crowded header anymore', () => {
++    renderHeader();
++    expect(screen.queryByRole('button', { name: '问这本书' })).toBeNull();
++    expect(screen.queryByText('问 AI')).toBeNull();
++  });
+   it('reserves room for the bookmark and translation touch halos inside the scroller', () => {
+     setViewport(392, 872);
+     const { container } = renderHeader();
 diff --git a/apps/readest-app/src/__tests__/components/PdfReflowDialog.test.tsx b/apps/readest-app/src/__tests__/components/PdfReflowDialog.test.tsx
 new file mode 100644
 index 0000000..f918b7a
@@ -1563,15 +1740,56 @@ index 0000000..512b45b
 +  });
 +});
 diff --git a/apps/readest-app/src/__tests__/components/annotator/AnnotatorLookupSurfaces.test.tsx b/apps/readest-app/src/__tests__/components/annotator/AnnotatorLookupSurfaces.test.tsx
-index 8565e01..2b458a2 100644
+index 8565e01..8b34676 100644
 --- a/apps/readest-app/src/__tests__/components/annotator/AnnotatorLookupSurfaces.test.tsx
 +++ b/apps/readest-app/src/__tests__/components/annotator/AnnotatorLookupSurfaces.test.tsx
-@@ -576,3 +576,50 @@ describe('the instant dictionary dismisses clean unless told to keep the selecti
+@@ -13,7 +13,7 @@
+  * surface on the frame it opened.
+  */
+ 
+-import { act, cleanup, render, screen } from '@testing-library/react';
++import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
+ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
+ import { eventDispatcher } from '@/utils/event';
+ import type { TextSelection } from '@/utils/sel';
+@@ -233,7 +233,11 @@ vi.mock('@/app/reader/components/annotator/ImportAnnotationsDialog', () => ({
+   default: () => null,
+ }));
+ vi.mock('@/app/reader/components/annotator/AnnotationPopup', () => ({
+-  default: () => <div data-testid='annotation-toolbar' />,
++  default: ({ buttons }: { buttons: { tooltipText: string; onClick: () => void }[] }) => (
++    <div data-testid='annotation-toolbar'>
++      {buttons.map(button => <button key={button.tooltipText} onClick={button.onClick}>{button.tooltipText}</button>)}
++    </div>
++  ),
+ }));
+ // The dismiss button stands in for the popup's close / backdrop tap, so a test
+ // can drive the route back out of the lookup. Each surface reads its text the
+@@ -576,3 +580,69 @@ describe('the instant dictionary dismisses clean unless told to keep the selecti
      expect(screen.queryByTestId('annotation-toolbar')).toBeNull();
    });
  });
 +
 +describe('reflow shares original selection services', () => {
++  test.each([false, true])('disabled quick action opens toolbar and sends selected text to AI (reflow=%s)', async reflow => {
++    h.viewSettings.enableAnnotationQuickActions = true;
++    h.viewSettings.annotationQuickAction = '';
++    const opened = vi.fn();
++    eventDispatcher.on('reading-ai-open', opened);
++    try {
++      render(<Annotator bookKey='book-1' contentInsets={{ top: 0, right: 0, bottom: 0, left: 0 }} />);
++      await selectText();
++      if (reflow) await act(async () => {
++        h.setSelection?.(prev => prev ? { ...prev, reflow: true, reflowQuickAction: undefined } : prev);
++      });
++      expect(screen.getByTestId('annotation-toolbar')).toBeTruthy();
++      fireEvent.click(screen.getByText('AI 解释'));
++      expect(opened).toHaveBeenCalledTimes(1);
++      expect(opened.mock.calls[0]![0].detail).toMatchObject({ bookKey: 'book-1', mode: 'selection', seed: { text: 'selected text', sectionIndex: 0 } });
++      expect(screen.queryByTestId('annotation-toolbar')).toBeNull();
++      expect(h.updateBooknotes).not.toHaveBeenCalled();
++    } finally { eventDispatcher.off('reading-ai-open', opened); }
++  });
 +  test('stores a proven original CFI with the correct reflow physical page', async () => {
 +    render(<Annotator bookKey='book-1' contentInsets={{ top: 0, right: 0, bottom: 0, left: 0 }} />);
 +    await selectText();
@@ -1616,6 +1834,57 @@ index 8565e01..2b458a2 100644
 +      eventDispatcher.off('tts-speak', speak);
 +    }
 +  });
++});
+diff --git a/apps/readest-app/src/__tests__/components/codex-oauth-settings.test.tsx b/apps/readest-app/src/__tests__/components/codex-oauth-settings.test.tsx
+new file mode 100644
+index 0000000..005a1cd
+--- /dev/null
++++ b/apps/readest-app/src/__tests__/components/codex-oauth-settings.test.tsx
+@@ -0,0 +1,45 @@
++import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
++import { afterEach, beforeEach, expect, it, vi } from 'vitest';
++const mocks = vi.hoisted(() => ({ signedIn: vi.fn(), start: vi.fn(), finish: vi.fn(), logout: vi.fn(), models: vi.fn(), open: vi.fn() }));
++vi.mock('@/services/ai/codexAuth', () => ({ codexSignedIn: mocks.signedIn, startCodexLogin: mocks.start, finishCodexLogin: mocks.finish, logoutCodex: mocks.logout, CODEX_LOGIN_URL: 'https://auth.openai.com/codex/device' }));
++vi.mock('@/services/ai/providers/CodexProvider', () => ({ DEFAULT_CODEX_MODEL: 'gpt-5.3-codex', fetchCodexModels: mocks.models }));
++vi.mock('@/utils/open', () => ({ openExternalUrl: mocks.open }));
++vi.mock('@/components/settings/primitives', () => ({ BoxedList: ({ children }: { children: React.ReactNode }) => <div>{children}</div> }));
++import CodexOAuthSettings from '@/components/settings/CodexOAuthSettings';
++beforeEach(() => { vi.clearAllMocks(); mocks.signedIn.mockResolvedValue(false); mocks.logout.mockResolvedValue(undefined); });
++afterEach(cleanup);
++it('does not automatically request login or models on opening settings', async () => {
++  render(<CodexOAuthSettings onModelChange={vi.fn()} />);
++  await waitFor(() => expect(mocks.signedIn).toHaveBeenCalledTimes(1));
++  expect(mocks.start).not.toHaveBeenCalled(); expect(mocks.models).not.toHaveBeenCalled();
++});
++it('shows user code, opens ONLY system browser on click, and cancels one submitted attempt', async () => {
++  mocks.start.mockResolvedValue({ user_code: 'ABCD-EFGH', device_auth_id: 'device-test', interval: 5, expires_at: Date.now() + 900000 });
++  mocks.finish.mockImplementation((_device, signal: AbortSignal) => new Promise((_resolve, reject) => signal.addEventListener('abort', () => reject(signal.reason))));
++  render(<CodexOAuthSettings onModelChange={vi.fn()} />);
++  fireEvent.click(screen.getByText('获取设备码登录'));
++  await screen.findByText('ABCD-EFGH');
++  expect(mocks.open).not.toHaveBeenCalled();
++  fireEvent.click(screen.getByText('在系统浏览器授权'));
++  expect(mocks.open).toHaveBeenCalledWith('https://auth.openai.com/codex/device');
++  fireEvent.click(screen.getByText('取消'));
++  await screen.findByText('获取设备码登录');
++  expect(mocks.finish.mock.calls[0]![1].aborted).toBe(true); expect(mocks.start).toHaveBeenCalledTimes(1);
++});
++it('reads models explicitly and clears saved auth on logout', async () => {
++  mocks.signedIn.mockResolvedValue(true); mocks.models.mockResolvedValue(['allowed-model']);
++  render(<CodexOAuthSettings onModelChange={vi.fn()} />);
++  await screen.findByText('已登录'); expect(mocks.models).not.toHaveBeenCalled();
++  fireEvent.click(screen.getByText('刷新模型列表'));
++  await waitFor(() => expect(mocks.models).toHaveBeenCalledTimes(1));
++  fireEvent.click(screen.getByText('退出登录并清除令牌'));
++  await screen.findByText('未登录'); expect(mocks.logout).toHaveBeenCalledTimes(1);
++});
++it('aborts pending device authorization when settings unmounts', async () => {
++  mocks.start.mockResolvedValue({ user_code: 'ABCD', device_auth_id: 'device-test', interval: 5, expires_at: Date.now() + 900000 });
++  mocks.finish.mockReturnValue(new Promise(() => {}));
++  const { unmount } = render(<CodexOAuthSettings onModelChange={vi.fn()} />);
++  fireEvent.click(screen.getByText('获取设备码登录'));
++  await screen.findByText('ABCD');
++  const signal = mocks.finish.mock.calls[0]![1]; unmount(); expect(signal.aborted).toBe(true);
 +});
 diff --git a/apps/readest-app/src/__tests__/components/page-jump-input.test.tsx b/apps/readest-app/src/__tests__/components/page-jump-input.test.tsx
 index 291f01a..a6afc5b 100644
@@ -2053,6 +2322,69 @@ index 0000000..5e70c40
 +    } finally {
 +      eventDispatcher.off('tts-speak', speak);
 +    }
++  });
++});
+diff --git a/apps/readest-app/src/__tests__/components/reading-ai-entry.test.tsx b/apps/readest-app/src/__tests__/components/reading-ai-entry.test.tsx
+new file mode 100644
+index 0000000..5858bc7
+--- /dev/null
++++ b/apps/readest-app/src/__tests__/components/reading-ai-entry.test.tsx
+@@ -0,0 +1,57 @@
++import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
++import { cleanup, fireEvent, render, screen } from '@testing-library/react';
++import { useState } from 'react';
++vi.mock('@/hooks/useTranslation', () => ({ useTranslation: () => (key: string) => key }));
++vi.mock('@/components/Menu', () => ({ default: ({ children }: { children: React.ReactNode }) => <div>{children}</div> }));
++vi.mock('@/components/MenuItem', () => ({ default: ({ label, onClick }: { label: string; onClick: () => void }) => <button onClick={onClick}>{label}</button> }));
++const dispatch = vi.hoisted(() => vi.fn());
++vi.mock('@/utils/event', () => ({ eventDispatcher: { dispatch } }));
++import QuickActionMenu from '@/app/reader/components/annotator/QuickActionMenu';
++import { annotationToolQuickActions } from '@/app/reader/components/annotator/AnnotationTools';
++import ReadingAIFloatingButton from '@/app/reader/components/ai/ReadingAIFloatingButton';
++import type { AnnotationToolType } from '@/types/annotator';
++class Observer { observe() {} disconnect() {} }
++beforeEach(() => { vi.clearAllMocks(); vi.stubGlobal('ResizeObserver', Observer); });
++afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
++describe('reader AI discoverability', () => {
++  it.each(['copy', 'highlight', 'translate', 'dictionary', 'tts'] as AnnotationToolType[])('explicitly disables %s without selecting another tool', action => {
++    const onSelect = vi.fn(); const onClose = vi.fn();
++    render(<QuickActionMenu selectedAction={action} onActionSelect={onSelect} setIsDropdownOpen={onClose} />);
++    fireEvent.click(screen.getByText('关闭即时功能 · 恢复选区工具栏'));
++    expect(onSelect).toHaveBeenCalledWith(null); expect(onClose).toHaveBeenCalledWith(false);
++  });
++  it('same action toggles off then can be re-enabled', () => {
++    function Harness() {
++      const [action, setAction] = useState<AnnotationToolType | null>('copy');
++      return <><output>{action || 'off'}</output><QuickActionMenu selectedAction={action} onActionSelect={next => setAction(next === action ? null : next)} /></>;
++    }
++    render(<Harness />);
++    const buttons = screen.getAllByText('Instant {{action}}', { selector: 'button' });
++    // copy is identified by its quick-action tooltip order, not a duplicated translated label.
++    const copyIndex = annotationToolQuickActions.findIndex(button => button.type === 'copy');
++    fireEvent.click(buttons[copyIndex]!);
++    expect(screen.getByText('off')).toBeTruthy();
++    fireEvent.click(buttons[copyIndex]!);
++    expect(screen.getByText('copy')).toBeTruthy();
++  });
++  it('places the floating button above visible footer and listening player', () => {
++    const original = HTMLElement.prototype.getBoundingClientRect;
++    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function(this: HTMLElement) {
++      const top = this.hasAttribute('data-view-transition-root') ? 0 : this.hasAttribute('data-reading-tts-player') ? 700 : 850;
++      return { top, bottom: this.hasAttribute('data-view-transition-root') ? 915 : 915, height: 915 - top, width: 412, left: 0, right: 412, x: 0, y: top, toJSON: () => ({}) };
++    });
++    try {
++      render(<div data-view-transition-root=''><div className='footer-bar' data-visible='true' /><div data-reading-tts-player='visible' /><ReadingAIFloatingButton bookKey='book-test' /></div>);
++      expect(screen.getByRole('button', { name: '问这本书' }).style.bottom).toBe('231px');
++    } finally { HTMLElement.prototype.getBoundingClientRect = original; }
++  });
++  it('floating AI dispatches correct book and does not cause a page turn', () => {
++    const turn = vi.fn();
++    render(<div onClick={turn}><ReadingAIFloatingButton bookKey='book-test' bottomInset={16} /></div>);
++    const button = screen.getByRole('button', { name: '问这本书' });
++    fireEvent.click(button);
++    expect(turn).not.toHaveBeenCalled();
++    expect(dispatch).toHaveBeenCalledWith('reading-ai-open', { bookKey: 'book-test', mode: 'book' });
++    expect(button.className).toContain('absolute'); expect(button.style.bottom).toBe('40px');
 +  });
 +});
 diff --git a/apps/readest-app/src/__tests__/components/reading-assistant-host.test.tsx b/apps/readest-app/src/__tests__/components/reading-assistant-host.test.tsx
@@ -2747,6 +3079,27 @@ index 0000000..52535d5
 +    expect(mocks.destroy).toHaveBeenCalledOnce();
 +  });
 +});
+diff --git a/apps/readest-app/src/__tests__/helpers/settings.test.ts b/apps/readest-app/src/__tests__/helpers/settings.test.ts
+index c9855cb..0cc623e 100644
+--- a/apps/readest-app/src/__tests__/helpers/settings.test.ts
++++ b/apps/readest-app/src/__tests__/helpers/settings.test.ts
+@@ -164,6 +164,16 @@ describe('getBackgroundTextureSettings', () => {
+ });
+ 
+ describe('saveViewSettings', () => {
++  test('disabling instant copy uses a new view-settings reference and preserves null', async () => {
++    const previous = { isGlobal: false, annotationQuickAction: 'copy', enableAnnotationQuickActions: true };
++    getViewSettingsMock.mockReturnValue(previous);
++    await saveViewSettings(envConfig, 'book-1', 'annotationQuickAction', null, false, false);
++    const next = setViewSettingsMock.mock.calls[0]![1];
++    expect(next).not.toBe(previous);
++    expect(next.annotationQuickAction).toBeNull();
++    expect(previous.annotationQuickAction).toBe('copy');
++    expect(next.enableAnnotationQuickActions).toBe(true);
++  });
+   test('global write swaps the settings reference so replicaSettingsSync subscribers fire', async () => {
+     // Mirrors the gating subscriber installed by replicaSettingsSync.initSettingsSync.
+     // The publish path is bypassed entirely when this never fires, which is exactly
 diff --git a/apps/readest-app/src/__tests__/hooks/usePdfReflowTTS.test.tsx b/apps/readest-app/src/__tests__/hooks/usePdfReflowTTS.test.tsx
 new file mode 100644
 index 0000000..ec81eb5
@@ -3771,7 +4124,7 @@ index 54fbed9..234b32a 100644
    return (
      <Button
 diff --git a/apps/readest-app/src/app/reader/components/BooksGrid.tsx b/apps/readest-app/src/app/reader/components/BooksGrid.tsx
-index 3ebb523..341cac9 100644
+index 3ebb523..e00aa84 100644
 --- a/apps/readest-app/src/app/reader/components/BooksGrid.tsx
 +++ b/apps/readest-app/src/app/reader/components/BooksGrid.tsx
 @@ -5,6 +5,7 @@ import type { Insets } from '@/types/misc';
@@ -3782,7 +4135,15 @@ index 3ebb523..341cac9 100644
  import { useBookProgress } from '@/store/readerProgressStore';
  import { useSidebarStore } from '@/store/sidebarStore';
  import { useBookDataStore } from '@/store/bookDataStore';
-@@ -113,6 +114,7 @@ const BookCellInner: React.FC<BookCellProps> = ({
+@@ -18,6 +19,7 @@ import BooknotesNav from './sidebar/BooknotesNav';
+ import FoliateViewer from './FoliateViewer';
+ import SectionInfo from './SectionInfo';
+ import HeaderBar from './HeaderBar';
++import ReadingAIFloatingButton from './ai/ReadingAIFloatingButton';
+ import PageNavigationButtons from './PageNavigationButtons';
+ import FooterBar from './footerbar/FooterBar';
+ import ProgressBar from './ProgressBar';
+@@ -113,6 +115,7 @@ const BookCellInner: React.FC<BookCellProps> = ({
    // relocate path — so this does NOT reintroduce the commit storm the
    // progress-store split removed.
    const progress = useBookProgress(bookKey);
@@ -3790,7 +4151,15 @@ index 3ebb523..341cac9 100644
    const viewState = useReaderStore((s) => s.viewStates[bookKey]);
    const viewSettings = viewState?.viewSettings ?? null;
  
-@@ -178,7 +180,12 @@ const BookCellInner: React.FC<BookCellProps> = ({
+@@ -159,6 +162,7 @@ const BookCellInner: React.FC<BookCellProps> = ({
+         appServiceHasRoundedWindow && 'rounded-window',
+       )}
+     >
++      <ReadingAIFloatingButton bookKey={bookKey} bottomInset={gridInsets.bottom} />
+       <HeaderBar
+         bookKey={bookKey}
+         gridInsets={gridInsets}
+@@ -178,7 +182,12 @@ const BookCellInner: React.FC<BookCellProps> = ({
          An opaque background inside the wrapper keeps the blend backdrop with
          the transformed group, so the drag is luminance-invariant.
        */}
@@ -3804,7 +4173,7 @@ index 3ebb523..341cac9 100644
          <FoliateViewer
            key={viewerKey}
            bookKey={bookKey}
-@@ -265,6 +272,10 @@ const BookCellInner: React.FC<BookCellProps> = ({
+@@ -265,6 +274,10 @@ const BookCellInner: React.FC<BookCellProps> = ({
            />
          )}
        </div>
@@ -3816,10 +4185,10 @@ index 3ebb523..341cac9 100644
        <PageNavigationButtons bookKey={bookKey} isDropdownOpen={isDropdownOpen} />
        <SearchResultsNav bookKey={bookKey} gridInsets={gridInsets} />
 diff --git a/apps/readest-app/src/app/reader/components/HeaderBar.tsx b/apps/readest-app/src/app/reader/components/HeaderBar.tsx
-index 58f1135..337a77e 100644
+index 58f1135..e44cada 100644
 --- a/apps/readest-app/src/app/reader/components/HeaderBar.tsx
 +++ b/apps/readest-app/src/app/reader/components/HeaderBar.tsx
-@@ -33,6 +33,12 @@ import NotebookToggler from './NotebookToggler';
+@@ -33,6 +33,11 @@ import NotebookToggler from './NotebookToggler';
  import TranslationToggler from './TranslationToggler';
  import ViewMenu from './ViewMenu';
  import SyncInfoDialog from './SyncInfoDialog';
@@ -3828,11 +4197,10 @@ index 58f1135..337a77e 100644
 +import { usePdfReflowStore } from '@/store/pdfReflowStore';
 +import '@/styles/reader-polish.css';
 +import { getPdfRendererPage } from '@/utils/pdfRendererPage';
-+import { eventDispatcher } from '@/utils/event';
  
  interface HeaderBarProps {
    bookKey: string;
-@@ -85,8 +91,34 @@ const HeaderBar: React.FC<HeaderBarProps> = ({
+@@ -85,8 +90,34 @@ const HeaderBar: React.FC<HeaderBarProps> = ({
  
    const [isDropdownOpen, setIsDropdownOpen] = useState(false);
    const [isMetaHashDialogOpen, setIsMetaHashDialogOpen] = useState(false);
@@ -3867,6 +4235,16 @@ index 58f1135..337a77e 100644
    const iconSize18 = useResponsiveSize(18);
  
    const docs = view?.renderer.getContents() ?? [];
+@@ -111,7 +142,8 @@ const HeaderBar: React.FC<HeaderBarProps> = ({
+ 
+   const handleAnnotationQuickActionSelect = (action: AnnotationToolType | null) => {
+     if (viewSettings?.annotationQuickAction === action) action = null;
+-    saveViewSettings(envConfig, bookKey, 'annotationQuickAction', action, false, true);
++    void saveViewSettings(envConfig, bookKey, 'annotationQuickAction', action, false, false);
++    handleToggleDropdown(false);
+   };
+ 
+   useEffect(() => {
 @@ -221,9 +253,12 @@ const HeaderBar: React.FC<HeaderBarProps> = ({
          ref={headerRef}
          role='banner'
@@ -3882,7 +4260,7 @@ index 58f1135..337a77e 100644
            trafficLightInHeader ? 'pl-20' : isSideBarVisible ? 'ps-4' : 'ps-4 sm:ps-1.5',
            appService?.hasRoundedWindow && 'rounded-window-top-right',
            !isSideBarVisible && appService?.hasRoundedWindow && 'rounded-window-top-left',
-@@ -269,6 +304,26 @@ const HeaderBar: React.FC<HeaderBarProps> = ({
+@@ -269,6 +304,16 @@ const HeaderBar: React.FC<HeaderBarProps> = ({
              >
                <VscLibrary size={iconSize18} className='fill-base-content' />
              </button>
@@ -3896,20 +4274,21 @@ index 58f1135..337a77e 100644
 +                {_(isPdfReflowOpen ? 'Switch to PDF' : 'Switch to Reflow')}
 +              </button>
 +            )}
-+            <button
-+              type='button'
-+              className='btn btn-ghost h-11 min-h-11 shrink-0 px-2 text-sm'
-+              aria-label='问这本书'
-+              onClick={() =>
-+                void eventDispatcher.dispatch('reading-ai-open', { bookKey, mode: 'book' })
-+              }
-+            >
-+              问 AI
-+            </button>
              <BookmarkToggler bookKey={bookKey} />
              <TranslationToggler bookKey={bookKey} />
            </div>
-@@ -343,8 +398,23 @@ const HeaderBar: React.FC<HeaderBarProps> = ({
+@@ -276,8 +321,8 @@ const HeaderBar: React.FC<HeaderBarProps> = ({
+             <Dropdown
+               label={
+                 annotationQuickAction
+-                  ? _('Disable Quick Action')
+-                  : _('Enable Quick Action on Selection')
++                  ? '即时功能已开启 · 点击可关闭或切换'
++                  : '即时功能已关闭 · 普通选取显示工具栏'
+               }
+               className='exclude-title-bar-mousedown dropdown-bottom dropdown-center'
+               menuClassName='relative!'
+@@ -343,8 +388,23 @@ const HeaderBar: React.FC<HeaderBarProps> = ({
              <ViewMenu
                bookKey={bookKey}
                onShowMetaHashDialog={() => setIsMetaHashDialogOpen(true)}
@@ -4650,6 +5029,75 @@ index c6b8210..78417f3 100644
        <MenuItem label={_('Settings')} Icon={PiGear} onClick={openSettingsDialog} />
        {bookData.book?.format === 'PDF' && appService?.supportsCanvasContext2DFilter && (
          <MenuItem
+diff --git a/apps/readest-app/src/app/reader/components/ai/ReadingAIFloatingButton.tsx b/apps/readest-app/src/app/reader/components/ai/ReadingAIFloatingButton.tsx
+new file mode 100644
+index 0000000..8b4437c
+--- /dev/null
++++ b/apps/readest-app/src/app/reader/components/ai/ReadingAIFloatingButton.tsx
+@@ -0,0 +1,63 @@
++import { useLayoutEffect, useRef, useState } from 'react';
++import { eventDispatcher } from '@/utils/event';
++
++export default function ReadingAIFloatingButton({
++  bookKey,
++  bottomInset = 0,
++}: {
++  bookKey: string;
++  bottomInset?: number;
++}) {
++  const ref = useRef<HTMLButtonElement>(null);
++  const [bottom, setBottom] = useState(bottomInset + 24);
++  useLayoutEffect(() => {
++    const cell = ref.current?.closest<HTMLElement>('[data-view-transition-root]');
++    if (!cell) return;
++    const measure = () => {
++      const frame = cell.getBoundingClientRect();
++      let space = bottomInset + 24;
++      for (const item of cell.querySelectorAll<HTMLElement>(
++        '.footer-bar[data-visible="true"], [data-reading-tts-player="visible"]',
++      )) {
++        const rect = item.getBoundingClientRect();
++        if (rect.height && rect.width) space = Math.max(space, frame.bottom - rect.top + 16);
++      }
++      setBottom(Math.min(space, Math.max(bottomInset + 24, frame.height - 76)));
++    };
++    const observer = new MutationObserver(measure);
++    const size = new ResizeObserver(measure);
++    observer.observe(cell, {
++      subtree: true,
++      attributes: true,
++      childList: true,
++      attributeFilter: ['class', 'style', 'data-visible', 'data-reading-tts-player'],
++    });
++    size.observe(cell);
++    window.addEventListener('resize', measure);
++    measure();
++    return () => {
++      observer.disconnect();
++      size.disconnect();
++      window.removeEventListener('resize', measure);
++    };
++  }, [bookKey, bottomInset]);
++  return (
++    <button
++      ref={ref}
++      type='button'
++      aria-label='问这本书'
++      title='问 AI'
++      className='reading-ai-floating absolute right-5 z-30 flex size-14 items-center justify-center rounded-full bg-neutral/80 text-neutral-content shadow-lg backdrop-blur-sm'
++      style={{ bottom }}
++      onPointerDown={(event) => event.stopPropagation()}
++      onClick={(event) => {
++        event.stopPropagation();
++        void eventDispatcher.dispatch('reading-ai-open', { bookKey, mode: 'book' });
++      }}
++    >
++      <span aria-hidden='true' className='text-lg font-semibold'>
++        AI<span className='align-top text-xs'>✦</span>
++      </span>
++    </button>
++  );
++}
 diff --git a/apps/readest-app/src/app/reader/components/ai/ReadingAssistantHost.tsx b/apps/readest-app/src/app/reader/components/ai/ReadingAssistantHost.tsx
 new file mode 100644
 index 0000000..a9dd09b
@@ -4747,10 +5195,10 @@ index 0000000..a9dd09b
 +}
 diff --git a/apps/readest-app/src/app/reader/components/ai/ReadingAssistantPanel.tsx b/apps/readest-app/src/app/reader/components/ai/ReadingAssistantPanel.tsx
 new file mode 100644
-index 0000000..d59d3b3
+index 0000000..d80c638
 --- /dev/null
 +++ b/apps/readest-app/src/app/reader/components/ai/ReadingAssistantPanel.tsx
-@@ -0,0 +1,627 @@
+@@ -0,0 +1,629 @@
 +import { useEffect, useRef, useState } from 'react';
 +import Dialog from '@/components/Dialog';
 +import ModalPortal from '@/components/ModalPortal';
@@ -5059,11 +5507,13 @@ index 0000000..d59d3b3
 +  const references =
 +    latest && answer === latest.answer ? citedPassages(answer, latest.context.passages) : [];
 +  const endpoint =
-+    ai.provider === 'openrouter'
-+      ? ai.openrouterBaseUrl
-+      : ai.provider === 'ollama'
-+        ? ai.ollamaBaseUrl
-+        : 'Vercel AI Gateway';
++    ai.provider === 'codex'
++      ? 'https://chatgpt.com/backend-api/codex'
++      : ai.provider === 'openrouter'
++        ? ai.openrouterBaseUrl
++        : ai.provider === 'ollama'
++          ? ai.ollamaBaseUrl
++          : 'Vercel AI Gateway';
 +  const destination = safeDestination(endpoint ?? '');
 +  return (
 +    <ModalPortal showOverlay={false}>
@@ -5555,6 +6005,34 @@ index 5a3ec96..8d6ddf1 100644
  
    // The lookup popups never deselect (handleDictionary / handleTranslation /
    // handleProofread only flip popup flags), so a genuine selection is still
+diff --git a/apps/readest-app/src/app/reader/components/annotator/QuickActionMenu.tsx b/apps/readest-app/src/app/reader/components/annotator/QuickActionMenu.tsx
+index 64b6952..5fb06a9 100644
+--- a/apps/readest-app/src/app/reader/components/annotator/QuickActionMenu.tsx
++++ b/apps/readest-app/src/app/reader/components/annotator/QuickActionMenu.tsx
+@@ -11,7 +11,7 @@ import Menu from '@/components/Menu';
+ interface QuickActionMenuProps {
+   menuClassName?: string;
+   selectedAction?: AnnotationToolType | null;
+-  onActionSelect: (action: AnnotationToolType) => void;
++  onActionSelect: (action: AnnotationToolType | null) => void;
+   setIsDropdownOpen?: (open: boolean) => void;
+ }
+ 
+@@ -54,6 +54,14 @@ const QuickActionMenu: React.FC<QuickActionMenuProps> = ({
+       )}
+       onCancel={() => setIsDropdownOpen?.(false)}
+     >
++      <MenuItem
++        label='关闭即时功能 · 恢复选区工具栏'
++        buttonClass={!selectedAction ? 'bg-base-300/85' : ''}
++        onClick={() => {
++          onActionSelect(null);
++          setIsDropdownOpen?.(false);
++        }}
++      />
+       {annotationToolQuickActions.map((button) => (
+         <MenuItem
+           key={button.type}
 diff --git a/apps/readest-app/src/app/reader/components/footerbar/ColorPanel.tsx b/apps/readest-app/src/app/reader/components/footerbar/ColorPanel.tsx
 index b7957d4..1a122fe 100644
 --- a/apps/readest-app/src/app/reader/components/footerbar/ColorPanel.tsx
@@ -5978,7 +6456,7 @@ index c6142a5..596fab7 100644
  
  export default TTSControl;
 diff --git a/apps/readest-app/src/app/reader/components/tts/TTSMiniPlayer.tsx b/apps/readest-app/src/app/reader/components/tts/TTSMiniPlayer.tsx
-index f8b039f..c6a7c29 100644
+index f8b039f..67e1957 100644
 --- a/apps/readest-app/src/app/reader/components/tts/TTSMiniPlayer.tsx
 +++ b/apps/readest-app/src/app/reader/components/tts/TTSMiniPlayer.tsx
 @@ -29,6 +29,7 @@ import { useCountdownLabel } from './useCountdownLabel';
@@ -6026,8 +6504,11 @@ index f8b039f..c6a7c29 100644
  
    const bottomOffset = viewSettings
      ? getTTSMiniPlayerBottomOffset(viewSettings, { barVisible, usesMobileBar, panelTopOffset })
-@@ -213,18 +221,36 @@ const TTSMiniPlayer = ({
+@@ -211,20 +219,39 @@ const TTSMiniPlayer = ({
+   return (
+     <div
        role='status'
++      data-reading-tts-player={visible ? 'visible' : 'hidden'}
        aria-label={`${_('Reading aloud')}: ${book?.title ?? ''}`}
        className={clsx(
 -        'absolute z-40 inset-x-4 sm:inset-x-0 sm:mx-auto sm:w-full sm:max-w-md',
@@ -6068,7 +6549,7 @@ index f8b039f..c6a7c29 100644
          {hasTimeline && (
            // E-ink has no legible grey tints: delineate the track with a crisp
            // 1px hairline, drop the buffer fill, and paint progress solid.
-@@ -275,6 +301,19 @@ const TTSMiniPlayer = ({
+@@ -275,6 +302,19 @@ const TTSMiniPlayer = ({
                  )}
                </div>
              </div>
@@ -6737,10 +7218,18 @@ index c6666dc..d9e8b57 100644
        )}
        dir={isRtl ? 'rtl' : undefined}
 diff --git a/apps/readest-app/src/components/settings/AIPanel.tsx b/apps/readest-app/src/components/settings/AIPanel.tsx
-index f7ccf1b..4116629 100644
+index f7ccf1b..24e5c35 100644
 --- a/apps/readest-app/src/components/settings/AIPanel.tsx
 +++ b/apps/readest-app/src/components/settings/AIPanel.tsx
-@@ -128,16 +128,22 @@ const AIPanel: React.FC = () => {
+@@ -12,6 +12,7 @@ import {
+ } from '@/services/ai/providers/OpenRouterProvider';
+ import { DEFAULT_AI_SETTINGS, GATEWAY_MODELS, MODEL_PRICING } from '@/services/ai/constants';
+ import type { AISettings, AIProviderName } from '@/services/ai/types';
++import CodexOAuthSettings from './CodexOAuthSettings';
+ import { exportReedyMetricsBundle } from '@/services/reedy/instrumentation';
+ import { isTauriAppPlatform } from '@/services/environment';
+ import { BoxedList, SettingLabel, SettingsRow, SettingsSwitchRow } from './primitives';
+@@ -128,16 +129,22 @@ const AIPanel: React.FC = () => {
      settingsRef.current = settings;
    }, [settings]);
  
@@ -6765,7 +7254,7 @@ index f7ccf1b..4116629 100644
      },
      [envConfig, setSettings, saveSettings],
    );
-@@ -184,9 +190,8 @@ const AIPanel: React.FC = () => {
+@@ -184,9 +191,8 @@ const AIPanel: React.FC = () => {
        // `name || id` so OpenRouter's friendly labels still show up.
        models.sort((a, b) => a.id.localeCompare(b.id));
        setOpenrouterModels(models);
@@ -6777,7 +7266,7 @@ index f7ccf1b..4116629 100644
      } catch (e) {
        setOpenrouterModels([]);
        setOpenrouterModelsError((e as Error).message || _('Failed to fetch models'));
-@@ -196,12 +201,12 @@ const AIPanel: React.FC = () => {
+@@ -196,12 +202,12 @@ const AIPanel: React.FC = () => {
      // eslint-disable-next-line react-hooks/exhaustive-deps
    }, [enabled, openrouterUrl, openrouterKey, openrouterModel]);
  
@@ -6795,13 +7284,13 @@ index f7ccf1b..4116629 100644
  
    useEffect(() => {
      isMounted.current = true;
-@@ -405,6 +410,18 @@ const AIPanel: React.FC = () => {
+@@ -405,6 +411,18 @@ const AIPanel: React.FC = () => {
  
    return (
      <div className='my-4 w-full space-y-6'>
 +      <div className='rounded-xl bg-base-200 p-3 text-sm space-y-2'>
 +        <p className='font-semibold'>阅读 AI：选中解释 · 问这本书 · 听书助手</p>
-+        <p>选中文字 → AI 解释；阅读顶栏 → 问 AI；听书卡片 → AI · 刚才那段。</p>
++        <p>选中文字 → AI 解释；右下悬浮按钮 → 问 AI；听书卡片 → AI · 刚才那段。</p>
 +        <p>
 +          先本地检索，再预览原文并确认发送。不会自动上传整本书；不需要 embedding 模型。建议使用
 +          OpenAI Compatible 自填 API 地址、密钥和模型。
@@ -6814,7 +7303,33 @@ index f7ccf1b..4116629 100644
        <BoxedList title={_('AI Assistant')}>
          <SettingsSwitchRow
            label={_('Enable AI Assistant')}
-@@ -702,6 +719,22 @@ const AIPanel: React.FC = () => {
+@@ -444,8 +462,25 @@ const AIPanel: React.FC = () => {
+             disabled={!enabled}
+           />
+         </SettingsRow>
++        <SettingsRow label='Codex OAuth · ChatGPT' asLabel>
++          <input
++            type='radio'
++            name='ai-provider'
++            className='radio'
++            checked={provider === 'codex'}
++            onChange={() => setProvider('codex')}
++            disabled={!enabled}
++          />
++        </SettingsRow>
+       </BoxedList>
+ 
++      {provider === 'codex' && (
++        <CodexOAuthSettings
++          model={aiSettings.codexModel}
++          onModelChange={(value) => void saveAiSetting('codexModel', value)}
++        />
++      )}
++
+       {provider === 'ollama' && (
+         <BoxedList title={_('Ollama Configuration')} className={disabledSection}>
+           {/* Stacked-content rows: label-on-top, input below — used when the
+@@ -702,6 +737,22 @@ const AIPanel: React.FC = () => {
              )}
            </div>
  
@@ -6837,6 +7352,194 @@ index f7ccf1b..4116629 100644
            {/* Embedding model — same /models listing as the LLM picker.
                OpenAI's /v1/models doesn't tag chat vs embedding, so the two
                selects share one list and the user picks the right one.
+diff --git a/apps/readest-app/src/components/settings/CodexOAuthSettings.tsx b/apps/readest-app/src/components/settings/CodexOAuthSettings.tsx
+new file mode 100644
+index 0000000..26f250c
+--- /dev/null
++++ b/apps/readest-app/src/components/settings/CodexOAuthSettings.tsx
+@@ -0,0 +1,182 @@
++import { useEffect, useRef, useState } from 'react';
++import {
++  codexSignedIn,
++  startCodexLogin,
++  finishCodexLogin,
++  logoutCodex,
++  CODEX_LOGIN_URL,
++  type CodexDevice,
++} from '@/services/ai/codexAuth';
++import { DEFAULT_CODEX_MODEL, fetchCodexModels } from '@/services/ai/providers/CodexProvider';
++import { openExternalUrl } from '@/utils/open';
++import { BoxedList } from './primitives';
++
++export default function CodexOAuthSettings({
++  model,
++  onModelChange,
++}: {
++  model?: string;
++  onModelChange: (value: string) => void;
++}) {
++  const [signedIn, setSignedIn] = useState(false);
++  const [device, setDevice] = useState<CodexDevice | null>(null);
++  const [busy, setBusy] = useState(false);
++  const [error, setError] = useState('');
++  const [models, setModels] = useState<string[]>([]);
++  const abort = useRef<AbortController | null>(null);
++  const active = useRef(true);
++  useEffect(() => {
++    active.current = true;
++    void codexSignedIn()
++      .then((value) => {
++        if (active.current) setSignedIn(value);
++      })
++      .catch(() => {
++        if (active.current) setError('安全存储不可用；Codex OAuth 仅支持原生应用');
++      });
++    return () => {
++      active.current = false;
++      abort.current?.abort();
++    };
++  }, []);
++  const login = async () => {
++    if (abort.current) return;
++    const controller = new AbortController();
++    abort.current = controller;
++    setBusy(true);
++    setError('');
++    setDevice(null);
++    try {
++      const code = await startCodexLogin(controller.signal);
++      if (!active.current || controller.signal.aborted) return;
++      setDevice(code);
++      await finishCodexLogin(code, controller.signal);
++      if (active.current && !controller.signal.aborted) {
++        setSignedIn(true);
++        setDevice(null);
++      }
++    } catch {
++      if (active.current && !controller.signal.aborted)
++        setError(
++          '登录失败或设备码过期，已停止。请检查网络及 ChatGPT 账号中的设备码授权设置，然后手动重试。',
++        );
++    } finally {
++      if (abort.current === controller) abort.current = null;
++      if (active.current) setBusy(false);
++    }
++  };
++  const cancel = () => {
++    abort.current?.abort();
++    setDevice(null);
++  };
++  const logout = async () => {
++    setBusy(true);
++    setError('');
++    try {
++      await logoutCodex();
++      setSignedIn(false);
++      setModels([]);
++    } catch {
++      setError('无法清除登录，请稍后重试');
++    } finally {
++      if (active.current) setBusy(false);
++    }
++  };
++  const refresh = async () => {
++    if (abort.current) return;
++    const controller = new AbortController();
++    abort.current = controller;
++    setBusy(true);
++    setError('');
++    try {
++      const list = await fetchCodexModels(controller.signal);
++      if (active.current) setModels(list);
++    } catch {
++      if (active.current && !controller.signal.aborted)
++        setError('模型列表读取失败；可手动填写有权限的模型 ID');
++    } finally {
++      if (abort.current === controller) abort.current = null;
++      if (active.current) setBusy(false);
++    }
++  };
++  return (
++    <BoxedList title='Codex OAuth · ChatGPT'>
++      <div className='space-y-3 p-3 text-sm'>
++        <p>
++          使用你的 ChatGPT 账号及 Codex 额度，不是 OpenAI API Key。可用模型和额度取决于账号权限。
++        </p>
++        <p>
++          授权在系统浏览器完成；访问/刷新令牌只保存在系统安全存储，不写入普通设置、备份或书籍笔记。不会读取
++          Minis 的账号。
++        </p>
++        <p role='status'>{signedIn ? '已登录' : busy ? '等待授权…' : '未登录'}</p>
++        {!signedIn && !busy && (
++          <button type='button' className='btn btn-outline' onClick={() => void login()}>
++            获取设备码登录
++          </button>
++        )}
++        {device && (
++          <div className='space-y-2 rounded-xl bg-base-200 p-3'>
++            <p>在浏览器输入此设备码（15 分钟内有效）：</p>
++            <p className='select-text text-2xl font-mono tracking-widest'>{device.user_code}</p>
++            <button
++              type='button'
++              className='btn btn-primary'
++              onClick={() => openExternalUrl(CODEX_LOGIN_URL)}
++            >
++              在系统浏览器授权
++            </button>
++            <p>
++              授权后返回此页面，自动完成检查。若账号禁用设备码登录，请先在 ChatGPT 安全设置启用。
++            </p>
++          </div>
++        )}
++        {busy && (
++          <button type='button' className='btn btn-ghost' onClick={cancel}>
++            取消
++          </button>
++        )}
++        {signedIn && (
++          <div className='flex flex-wrap gap-2'>
++            <button
++              type='button'
++              disabled={busy}
++              className='btn btn-outline'
++              onClick={() => void refresh()}
++            >
++              刷新模型列表
++            </button>
++            <button
++              type='button'
++              disabled={busy}
++              className='btn btn-ghost'
++              onClick={() => void logout()}
++            >
++              退出登录并清除令牌
++            </button>
++          </div>
++        )}
++        <label className='block'>
++          模型 ID
++          <input
++            className='input input-bordered mt-1 w-full'
++            value={model || DEFAULT_CODEX_MODEL}
++            list='codex-models'
++            onChange={(event) => onModelChange(event.target.value)}
++          />
++        </label>
++        <datalist id='codex-models'>
++          {models.map((id) => (
++            <option key={id} value={id} />
++          ))}
++        </datalist>
++        <p>仅在点击刷新或测试连接时读取模型列表。阅读内容仍需逐次预览并确认发送给 OpenAI。</p>
++        {error && (
++          <p role='alert' className='text-error'>
++            {error}
++          </p>
++        )}
++      </div>
++    </BoxedList>
++  );
++}
 diff --git a/apps/readest-app/src/components/settings/SettingsDialog.tsx b/apps/readest-app/src/components/settings/SettingsDialog.tsx
 index 87c350b..84c7b02 100644
 --- a/apps/readest-app/src/components/settings/SettingsDialog.tsx
@@ -6851,6 +7554,25 @@ index 87c350b..84c7b02 100644
      },
      {
        tab: 'TTS',
+diff --git a/apps/readest-app/src/helpers/settings.ts b/apps/readest-app/src/helpers/settings.ts
+index e7e30f8..5a4fbc6 100644
+--- a/apps/readest-app/src/helpers/settings.ts
++++ b/apps/readest-app/src/helpers/settings.ts
+@@ -70,11 +70,11 @@ export const saveViewSettings = async <K extends keyof ViewSettings>(
+     const viewSettings = getViewSettings(bookKey);
+     const viewState = getViewState(bookKey);
+     if (bookKey && viewSettings && viewSettings[key] !== value) {
+-      viewSettings[key] = value;
+-      setViewSettings(bookKey, viewSettings);
++      const nextViewSettings = { ...viewSettings, [key]: value };
++      setViewSettings(bookKey, nextViewSettings);
+       if (applyStyles) {
+         const view = getView(bookKey);
+-        view?.renderer.setStyles?.(getStyles(viewSettings));
++        view?.renderer.setStyles?.(getStyles(nextViewSettings));
+       }
+       const config = getConfig(bookKey);
+       if (viewState?.isPrimary && config) {
 diff --git a/apps/readest-app/src/libs/document.ts b/apps/readest-app/src/libs/document.ts
 index 96f5ed9..985e83b 100644
 --- a/apps/readest-app/src/libs/document.ts
@@ -6869,6 +7591,227 @@ index 96f5ed9..985e83b 100644
  
    // EPUB 3 Media Overlays: the manifest item of this section's SMIL file, or
    // null when the section has no recorded narration. Populated by foliate's
+diff --git a/apps/readest-app/src/services/ai/adapters/ReedyBackend.ts b/apps/readest-app/src/services/ai/adapters/ReedyBackend.ts
+index 2f9a8dc..bfad3e0 100644
+--- a/apps/readest-app/src/services/ai/adapters/ReedyBackend.ts
++++ b/apps/readest-app/src/services/ai/adapters/ReedyBackend.ts
+@@ -232,6 +232,8 @@ function adaptEmbeddingModel(settings: AISettings): ReedyEmbeddingModel {
+ 
+ function embeddingModelIdFor(settings: AISettings): string {
+   switch (settings.provider) {
++    case 'codex':
++      throw new Error('Codex OAuth 不提供 embedding；请使用阅读助手本地检索');
+     case 'ollama':
+       return settings.ollamaEmbeddingModel || 'nomic-embed-text';
+     case 'ai-gateway':
+diff --git a/apps/readest-app/src/services/ai/codexAuth.ts b/apps/readest-app/src/services/ai/codexAuth.ts
+new file mode 100644
+index 0000000..32a3ead
+--- /dev/null
++++ b/apps/readest-app/src/services/ai/codexAuth.ts
+@@ -0,0 +1,202 @@
++import { clearSecureItem, getSecureItem, setSecureItem } from '@/utils/bridge';
++import { isTauriAppPlatform } from '@/services/environment';
++import { getAIFetch } from './utils/httpFetch';
++
++export const CODEX_BASE = 'https://chatgpt.com/backend-api/codex';
++export const CODEX_LOGIN_URL = 'https://auth.openai.com/codex/device';
++const ISSUER = 'https://auth.openai.com';
++const CLIENT = 'app_EMoamEEZ73f0CkXaXp7hrann';
++const KEY = 'readest.ai.codex.oauth.v1';
++// Tauri HTTP ignores the standard redirect field; use its explicit native option too.
++export const codexHttp: typeof fetch = (input, init) =>
++  getAIFetch()(input, Object.assign({}, init, { redirect: 'error' as const, maxRedirections: 0 }));
++interface Tokens {
++  access_token: string;
++  refresh_token: string;
++  expires_at: number;
++  account_id: string;
++}
++export interface CodexDevice {
++  user_code: string;
++  device_auth_id: string;
++  interval: number;
++  expires_at: number;
++}
++let epoch = 0;
++let refresh: Promise<Tokens> | null = null;
++
++async function load(): Promise<Tokens | null> {
++  if (!isTauriAppPlatform()) throw new Error('Codex OAuth 需要原生应用及系统安全存储');
++  const result = await getSecureItem({ key: KEY });
++  if (result.error) throw new Error('无法读取系统安全存储');
++  if (!result.value) return null;
++  try {
++    const value = JSON.parse(result.value) as Tokens;
++    if (
++      typeof value.access_token !== 'string' ||
++      !value.access_token ||
++      typeof value.account_id !== 'string' ||
++      !value.account_id ||
++      typeof value.refresh_token !== 'string' ||
++      !Number.isFinite(value.expires_at)
++    ) {
++      throw new Error('Invalid credentials');
++    }
++    return value;
++  } catch {
++    throw new Error('登录数据无效，请重新登录');
++  }
++}
++async function save(tokens: Tokens, generation: number, signal?: AbortSignal) {
++  signal?.throwIfAborted();
++  if (generation !== epoch) throw new Error('登录已取消');
++  const result = await setSecureItem({ key: KEY, value: JSON.stringify(tokens) });
++  if (!result.success) throw new Error('无法保存到系统安全存储');
++  if (generation !== epoch || signal?.aborted) {
++    const cleared = await clearSecureItem({ key: KEY });
++    if (!cleared.success) throw new Error('取消后无法清除授权，请在设置中退出登录');
++    signal?.throwIfAborted();
++    throw new Error('登录已取消');
++  }
++}
++function decodeAccount(token: string): string {
++  try {
++    const part = token.split('.')[1]!;
++    const data = JSON.parse(
++      atob(
++        part
++          .replace(/-/g, '+')
++          .replace(/_/g, '/')
++          .padEnd(Math.ceil(part.length / 4) * 4, '='),
++      ),
++    );
++    return data['https://api.openai.com/auth']?.chatgpt_account_id || '';
++  } catch {
++    return '';
++  }
++}
++async function exchange(
++  body: URLSearchParams,
++  previous?: Tokens,
++  signal?: AbortSignal,
++): Promise<Tokens> {
++  const response = await codexHttp(`${ISSUER}/oauth/token`, {
++    method: 'POST',
++    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
++    body: body.toString(),
++    signal: signal
++      ? AbortSignal.any([signal, AbortSignal.timeout(30000)])
++      : AbortSignal.timeout(30000),
++    redirect: 'error',
++  });
++  if (!response.ok) throw new Error(`Codex 授权失败（HTTP ${response.status}），请重新登录`);
++  const data = await response.json();
++  if (!data.access_token) throw new Error('授权响应缺少令牌');
++  const account_id =
++    decodeAccount(data.access_token) ||
++    decodeAccount(data.id_token || '') ||
++    previous?.account_id ||
++    '';
++  if (!account_id) throw new Error('授权响应缺少 ChatGPT 账号 ID');
++  return {
++    access_token: data.access_token,
++    refresh_token: data.refresh_token || previous?.refresh_token || '',
++    account_id,
++    expires_at: Date.now() + (Number(data.expires_in) || 3600) * 1000,
++  };
++}
++export async function codexSignedIn(): Promise<boolean> {
++  return !!(await load())?.access_token;
++}
++export async function logoutCodex() {
++  epoch++;
++  const result = await clearSecureItem({ key: KEY });
++  if (!result.success) throw new Error('无法清除系统安全存储');
++}
++export async function startCodexLogin(signal: AbortSignal): Promise<CodexDevice> {
++  const response = await codexHttp(`${ISSUER}/api/accounts/deviceauth/usercode`, {
++    method: 'POST',
++    headers: { 'Content-Type': 'application/json' },
++    body: JSON.stringify({ client_id: CLIENT }),
++    signal: AbortSignal.any([signal, AbortSignal.timeout(30000)]),
++    redirect: 'error',
++  });
++  if (!response.ok) throw new Error(`设备码申请失败（HTTP ${response.status}），请稍后手动重试`);
++  const data = await response.json();
++  if (!data.user_code || !data.device_auth_id) throw new Error('设备码响应不完整');
++  return {
++    user_code: data.user_code,
++    device_auth_id: data.device_auth_id,
++    interval: Math.max(3, Number(data.interval) || 5),
++    expires_at: Date.now() + 900000,
++  };
++}
++function wait(ms: number, signal: AbortSignal): Promise<void> {
++  return new Promise((resolve, reject) => {
++    signal.throwIfAborted();
++    const cancel = () => {
++      clearTimeout(timer);
++      reject(signal.reason);
++    };
++    const timer = setTimeout(() => {
++      signal.removeEventListener('abort', cancel);
++      resolve();
++    }, ms);
++    signal.addEventListener('abort', cancel, { once: true });
++  });
++}
++export async function finishCodexLogin(device: CodexDevice, signal: AbortSignal) {
++  const generation = epoch;
++  while (Date.now() < device.expires_at) {
++    await wait(device.interval * 1000, signal);
++    const response = await codexHttp(`${ISSUER}/api/accounts/deviceauth/token`, {
++      method: 'POST',
++      headers: { 'Content-Type': 'application/json' },
++      body: JSON.stringify({ device_auth_id: device.device_auth_id, user_code: device.user_code }),
++      signal: AbortSignal.any([signal, AbortSignal.timeout(30000)]),
++      redirect: 'error',
++    });
++    if (response.status === 403 || response.status === 404) continue;
++    if (!response.ok) throw new Error(`授权检查失败（HTTP ${response.status}），已停止轮询`);
++    const code = await response.json();
++    if (!code.authorization_code || !code.code_verifier) throw new Error('授权码响应不完整');
++    const tokens = await exchange(
++      new URLSearchParams({
++        grant_type: 'authorization_code',
++        client_id: CLIENT,
++        code: code.authorization_code,
++        code_verifier: code.code_verifier,
++        redirect_uri: `${ISSUER}/deviceauth/callback`,
++      }),
++      undefined,
++      signal,
++    );
++    await save(tokens, generation, signal);
++    return;
++  }
++  throw new Error('设备码已过期，请重新登录');
++}
++export async function codexCredentials(): Promise<Tokens> {
++  const tokens = await load();
++  if (!tokens) throw new Error('请先登录 Codex OAuth');
++  if (tokens.expires_at > Date.now() + 60000) return tokens;
++  if (!tokens.refresh_token) throw new Error('登录已过期，请重新登录');
++  if (!refresh) {
++    const generation = epoch;
++    refresh = (async () => {
++      const updated = await exchange(
++        new URLSearchParams({
++          grant_type: 'refresh_token',
++          client_id: CLIENT,
++          refresh_token: tokens.refresh_token,
++        }),
++        tokens,
++      );
++      await save(updated, generation);
++      return updated;
++    })().finally(() => {
++      refresh = null;
++    });
++  }
++  return refresh;
++}
 diff --git a/apps/readest-app/src/services/ai/providers/AIGatewayProvider.ts b/apps/readest-app/src/services/ai/providers/AIGatewayProvider.ts
 index 8d518ef..09a7ab3 100644
 --- a/apps/readest-app/src/services/ai/providers/AIGatewayProvider.ts
@@ -6890,6 +7833,131 @@ index 8d518ef..09a7ab3 100644
      aiLogger.provider.init(
        'ai-gateway',
        settings.aiGatewayModel || GATEWAY_MODELS.GEMINI_FLASH_LITE,
+diff --git a/apps/readest-app/src/services/ai/providers/CodexProvider.ts b/apps/readest-app/src/services/ai/providers/CodexProvider.ts
+new file mode 100644
+index 0000000..047af3a
+--- /dev/null
++++ b/apps/readest-app/src/services/ai/providers/CodexProvider.ts
+@@ -0,0 +1,101 @@
++import { createOpenAI } from '@ai-sdk/openai';
++import type { LanguageModel, EmbeddingModel } from 'ai';
++import type { AIProvider, AIProviderName, AISettings } from '../types';
++import { CODEX_BASE, codexCredentials, codexSignedIn, codexHttp } from '../codexAuth';
++
++export const DEFAULT_CODEX_MODEL = 'gpt-5.3-codex';
++export const CODEX_CLIENT_VERSION = '0.101.0';
++// Codex uses Responses SSE, not the public API chat/completions endpoint.
++export function codexFetch(): typeof fetch {
++  return async (input, init) => {
++    const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
++    const target = new URL(url);
++    if (
++      target.origin !== 'https://chatgpt.com' ||
++      !target.pathname.startsWith('/backend-api/codex/')
++    )
++      throw new Error('拒绝向非 Codex 服务发送 OAuth 凭据');
++    init?.signal?.throwIfAborted();
++    const credentials = await codexCredentials();
++    init?.signal?.throwIfAborted();
++    const headers = new Headers(init?.headers);
++    headers.set('Authorization', `Bearer ${credentials.access_token}`);
++    headers.set('ChatGPT-Account-ID', credentials.account_id);
++    headers.set('originator', 'readest');
++    headers.set('User-Agent', 'Readest/0.12.10');
++    headers.set('Accept', 'text/event-stream');
++    let body = init?.body;
++    if (target.pathname.endsWith('/responses') && typeof body === 'string') {
++      const request = JSON.parse(body);
++      request.store = false;
++      request.stream = true;
++      request.instructions ||= 'You are a helpful reading assistant.';
++      const instructions: string[] = [];
++      request.input = (request.input || []).filter(
++        (item: { role?: string; content?: string | { text?: string }[] }) => {
++          if (item.role !== 'system' && item.role !== 'developer') return true;
++          instructions.push(
++            typeof item.content === 'string'
++              ? item.content
++              : (item.content || []).map((part) => part.text || '').join('\n'),
++          );
++          return false;
++        },
++      );
++      if (instructions.length)
++        request.instructions = `${request.instructions}\n${instructions.join('\n')}`;
++      // Unsupported Codex fields: omit instead of retrying a billed request.
++      for (const key of ['max_output_tokens', 'temperature', 'top_p', 'previous_response_id'])
++        delete request[key];
++      body = JSON.stringify(request);
++    }
++    const response = await codexHttp(url, { ...init, body, headers, redirect: 'error' });
++    if (!response.ok)
++      throw new Error(
++        `Codex 请求失败（HTTP ${response.status}）。请检查登录、模型权限或订阅额度。`,
++      );
++    return response;
++  };
++}
++export async function fetchCodexModels(signal?: AbortSignal): Promise<string[]> {
++  const response = await codexFetch()(
++    `${CODEX_BASE}/models?client_version=${CODEX_CLIENT_VERSION}`,
++    {
++      method: 'GET',
++      signal: signal
++        ? AbortSignal.any([signal, AbortSignal.timeout(20000)])
++        : AbortSignal.timeout(20000),
++    },
++  );
++  const data = await response.json();
++  const list = data.models || data.data || [];
++  return list
++    .map((model: { slug?: string; id?: string }) => model.slug || model.id)
++    .filter(Boolean);
++}
++export class CodexProvider implements AIProvider {
++  id: AIProviderName = 'codex';
++  name = 'Codex OAuth (ChatGPT)';
++  requiresAuth = true;
++  constructor(private settings: AISettings) {}
++  getModel(): LanguageModel {
++    return createOpenAI({
++      apiKey: 'oauth-managed',
++      baseURL: CODEX_BASE,
++      fetch: codexFetch(),
++    }).responses(this.settings.codexModel || DEFAULT_CODEX_MODEL);
++  }
++  getEmbeddingModel(): EmbeddingModel {
++    throw new Error('Codex OAuth 不提供 embedding；阅读助手使用本地检索');
++  }
++  async isAvailable() {
++    return codexSignedIn();
++  }
++  async healthCheck() {
++    try {
++      return (await fetchCodexModels()).length > 0;
++    } catch {
++      return false;
++    }
++  }
++}
+diff --git a/apps/readest-app/src/services/ai/providers/index.ts b/apps/readest-app/src/services/ai/providers/index.ts
+index 531da2d..de2dffa 100644
+--- a/apps/readest-app/src/services/ai/providers/index.ts
++++ b/apps/readest-app/src/services/ai/providers/index.ts
+@@ -1,3 +1,4 @@
++import { CodexProvider } from './CodexProvider';
+ import { OllamaProvider } from './OllamaProvider';
+ import { AIGatewayProvider } from './AIGatewayProvider';
+ import { OpenRouterProvider } from './OpenRouterProvider';
+@@ -7,6 +8,8 @@ export { OllamaProvider, AIGatewayProvider, OpenRouterProvider };
+ 
+ export function getAIProvider(settings: AISettings): AIProvider {
+   switch (settings.provider) {
++    case 'codex':
++      return new CodexProvider(settings);
+     case 'ollama':
+       return new OllamaProvider(settings);
+     case 'ai-gateway':
 diff --git a/apps/readest-app/src/services/ai/readingAssistant.ts b/apps/readest-app/src/services/ai/readingAssistant.ts
 new file mode 100644
 index 0000000..9c45ed5
@@ -7358,6 +8426,50 @@ index 0000000..a9a24a6
 +    );
 +  });
 +}
+diff --git a/apps/readest-app/src/services/ai/types.ts b/apps/readest-app/src/services/ai/types.ts
+index 5e5c888..5ccf23a 100644
+--- a/apps/readest-app/src/services/ai/types.ts
++++ b/apps/readest-app/src/services/ai/types.ts
+@@ -1,6 +1,6 @@
+ import type { LanguageModel, EmbeddingModel } from 'ai';
+ 
+-export type AIProviderName = 'ollama' | 'ai-gateway' | 'openrouter';
++export type AIProviderName = 'ollama' | 'ai-gateway' | 'openrouter' | 'codex';
+ 
+ export interface AIProvider {
+   id: AIProviderName;
+@@ -34,6 +34,9 @@ export interface AISettings {
+   openrouterModel?: string;
+   openrouterEmbeddingModel?: string;
+ 
++  // OAuth credentials live ONLY in the OS keychain, not settings/sync/backup.
++  codexModel?: string;
++
+   spoilerProtection: boolean;
+   maxContextChunks: number;
+   indexingMode: 'on-demand' | 'background';
+diff --git a/apps/readest-app/src/services/reedy/models/registry.ts b/apps/readest-app/src/services/reedy/models/registry.ts
+index bf24de1..a35a987 100644
+--- a/apps/readest-app/src/services/reedy/models/registry.ts
++++ b/apps/readest-app/src/services/reedy/models/registry.ts
+@@ -112,6 +112,8 @@ function adaptChatModel(languageModel: import('ai').LanguageModel, id: string):
+ 
+ function chatModelIdFor(settings: AISettings): string {
+   switch (settings.provider) {
++    case 'codex':
++      return settings.codexModel || 'gpt-5.3-codex';
+     case 'ollama':
+       return settings.ollamaModel || 'llama3.2';
+     case 'ai-gateway':
+@@ -167,6 +169,8 @@ function adaptEmbeddingModel(
+ 
+ function embeddingModelIdFor(settings: AISettings): string {
+   switch (settings.provider) {
++    case 'codex':
++      throw new Error('Codex OAuth 不提供 embedding；请使用阅读助手本地检索');
+     case 'ollama':
+       return settings.ollamaEmbeddingModel || 'nomic-embed-text';
+     case 'ai-gateway':
 diff --git a/apps/readest-app/src/services/tts/TTSController.ts b/apps/readest-app/src/services/tts/TTSController.ts
 index 240fc99..79f3a7a 100644
 --- a/apps/readest-app/src/services/tts/TTSController.ts
@@ -8637,3 +9749,86 @@ index 0000000..0f03691
 +```
 +
 +保留 Readest 原有 AGPL-3.0 许可及署名。
+diff --git a/pnpm-lock.yaml b/pnpm-lock.yaml
+index b064b65..77ad4a3 100644
+--- a/pnpm-lock.yaml
++++ b/pnpm-lock.yaml
+@@ -83,6 +83,9 @@ importers:
+ 
+   apps/readest-app:
+     dependencies:
++      '@ai-sdk/openai':
++        specifier: ^3.0.123
++        version: 3.0.123(zod@4.4.3)
+       '@ai-sdk/openai-compatible':
+         specifier: ^2.0.48
+         version: 2.0.48(zod@4.4.3)
+@@ -739,16 +742,32 @@ packages:
+     peerDependencies:
+       zod: ^3.25.76 || ^4.1.8
+ 
++  '@ai-sdk/openai@3.0.123':
++    resolution: {integrity: sha512-v8jIjqh3Eo86IEo9pXTsH+KxvzCpoo6/E+PuA6mCZywwVVVQ2k8nhI1hs/K6b/XJk5fRjRJ132kA/uYyTBucHQ==}
++    engines: {node: '>=18'}
++    peerDependencies:
++      zod: ^3.25.76 || ^4.1.8
++
+   '@ai-sdk/provider-utils@4.0.27':
+     resolution: {integrity: sha512-ubkAJ+xODouwtmN1tYlvTPphH1hPOBfZaEQe8U7skGvFAnIRs9PPpsq57bC2+Ky/MB4yzhd6YOsxTAx9sGpazw==}
+     engines: {node: '>=18'}
+     peerDependencies:
+       zod: ^3.25.76 || ^4.1.8
+ 
++  '@ai-sdk/provider-utils@4.0.57':
++    resolution: {integrity: sha512-89a7sPvZqXsP3PigcAQLWntu/duIVEcN/RyChAB+j6p3C7NwW767sVttvL8r0+BetTg63uAXQoYHCZZueQKBSw==}
++    engines: {node: '>=18.17'}
++    peerDependencies:
++      zod: ^3.25.76 || ^4.1.8
++
+   '@ai-sdk/provider@3.0.10':
+     resolution: {integrity: sha512-Q3BZ27qfpYqnCYGvE3vt+Qi6LGOF9R5Nmzn+9JoM1lCRsD9mYaIhfJLkSunN48nfGXJ6n+XNV0J/XVpqGQl7Dw==}
+     engines: {node: '>=18'}
+ 
++  '@ai-sdk/provider@3.0.18':
++    resolution: {integrity: sha512-IpefF5ssZVOZCD4Wu7zxt6PwZoGT2HLVjxpJ10Bjx6EAmRfLYJPjyrfxb0RYDlwvXnDb9nkQ7Do/oJVDuRFzew==}
++    engines: {node: '>=18'}
++
+   '@ai-sdk/react@3.0.179':
+     resolution: {integrity: sha512-wq3gqDrwi6QvwHQuVrTpjeUQI/LHZ5ysokWTIS1hOFw0UIIX8eVpri5iVvqQuq5CeQw/6bYXSI15SfMtZJixpQ==}
+     engines: {node: '>=18'}
+@@ -8879,6 +8898,12 @@ snapshots:
+       '@ai-sdk/provider-utils': 4.0.27(patch_hash=168f9924f516aa1264359fc6b3520c6aaba761842888ccd504660fc30ee96d6f)(zod@4.4.3)
+       zod: 4.4.3
+ 
++  '@ai-sdk/openai@3.0.123(zod@4.4.3)':
++    dependencies:
++      '@ai-sdk/provider': 3.0.18
++      '@ai-sdk/provider-utils': 4.0.57(zod@4.4.3)
++      zod: 4.4.3
++
+   '@ai-sdk/provider-utils@4.0.27(patch_hash=168f9924f516aa1264359fc6b3520c6aaba761842888ccd504660fc30ee96d6f)(zod@4.4.3)':
+     dependencies:
+       '@ai-sdk/provider': 3.0.10
+@@ -8886,10 +8911,22 @@ snapshots:
+       eventsource-parser: 3.0.8
+       zod: 4.4.3
+ 
++  '@ai-sdk/provider-utils@4.0.57(zod@4.4.3)':
++    dependencies:
++      '@ai-sdk/provider': 3.0.18
++      '@standard-schema/spec': 1.1.0
++      eventsource-parser: 3.0.8
++      undici: 7.29.0
++      zod: 4.4.3
++
+   '@ai-sdk/provider@3.0.10':
+     dependencies:
+       json-schema: 0.4.0
+ 
++  '@ai-sdk/provider@3.0.18':
++    dependencies:
++      json-schema: 0.4.0
++
+   '@ai-sdk/react@3.0.179(react@19.2.8)(zod@4.4.3)':
+     dependencies:
+       '@ai-sdk/provider-utils': 4.0.27(patch_hash=168f9924f516aa1264359fc6b3520c6aaba761842888ccd504660fc30ee96d6f)(zod@4.4.3)
