@@ -32,6 +32,8 @@ Reflow now exposes the existing read-aloud transport, highlights real spoken wor
 
 The post-20005 fix verifies PDF navigation using fixed-layout's actual physical `index`, rather than its nonexistent `primaryIndex`, and places listening/page controls in a separate flow-layout footer. The scrollable article receives only the remaining height: footer wrapping on narrow screens never overlays body text. 315 targeted tests and the project typecheck pass locally; real WebView CSS checks cover phone/narrow/landscape dimensions, but the updated APK still needs device acceptance. An intermittent visual-follow detachment observed in the prior device test is not addressed by these two fixes.
 
+The post-20006 update unifies read-aloud UI: reflow borrows the original mini player and full player sheet through a per-book visual host, while the same mounted TTSControl keeps ownership of the playback session. It exposes speed, voice, timeout, sentence navigation, and timeline seeking when supported by the engine. The card occupies real footer height and remains reachable with reflow chrome hidden; Back/Escape dismiss the nested player before leaving the reader. 21 targeted files / 392 tests and the full TypeScript check pass locally. A broader compatible set passes 50 files / 731 tests; three unrelated cache suites cannot load Turso native bindings in the local Alpine environment. No updated APK device acceptance is claimed.
+
 The user's sample PDFs and extracted text are never published here. The existing preview signing key is reused for in-place preview updates.
 
 ## Scope

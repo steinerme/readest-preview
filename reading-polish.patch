@@ -219,14 +219,15 @@ index f87ff3c..74afc29 100644
  describe('HeaderBar sidebar toggle', () => {
 diff --git a/apps/readest-app/src/__tests__/components/PdfReflowDialog.test.tsx b/apps/readest-app/src/__tests__/components/PdfReflowDialog.test.tsx
 new file mode 100644
-index 0000000..9208982
+index 0000000..4b113fa
 --- /dev/null
 +++ b/apps/readest-app/src/__tests__/components/PdfReflowDialog.test.tsx
-@@ -0,0 +1,373 @@
+@@ -0,0 +1,393 @@
 +import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 +import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 +import PdfReflowDialog from '@/app/reader/components/PdfReflowDialog';
 +import { eventDispatcher } from '@/utils/event';
++import { useTTSPlayerHostStore } from '@/store/ttsPlayerHostStore';
 +
 +vi.mock('@/context/EnvContext', () => ({ useEnv: () => ({ appService: { isAndroidApp: true } }) }));
 +vi.mock('@/store/themeStore', () => ({
@@ -479,6 +480,23 @@ index 0000000..9208982
 +    expect(second.container.querySelector('header')!.hasAttribute('inert')).toBe(true);
 +  });
 +
++  it('registers the shared player host, gives nested sheets Back priority, and releases only the host', async () => {
++    const close = vi.fn();
++    const { container, unmount } = render(<PdfReflowDialog bookKey='pdf-1' onClose={close} />);
++    await screen.findByText('第一页正文。');
++    const host = container.querySelector('.pdf-reflow-player-host') as HTMLElement;
++    expect(useTTSPlayerHostStore.getState().hosts['pdf-1']).toBe(host);
++    const sheet = document.createElement('dialog');
++    sheet.open = true;
++    host.append(sheet);
++    expect(eventDispatcher.dispatchSync('native-key-down', { keyName: 'Back' })).toBe(false);
++    fireEvent.keyDown(window, { key: 'Escape' });
++    expect(close).not.toHaveBeenCalled();
++    sheet.remove();
++    unmount();
++    expect(useTTSPlayerHostStore.getState().hosts['pdf-1']).toBeUndefined();
++  });
++
 +  it('cleans up native Back and Escape listeners on unmount', () => {
 +    const close = vi.fn();
 +    const { unmount } = render(<PdfReflowDialog bookKey='pdf-1' onClose={close} />);
@@ -528,7 +546,9 @@ index 0000000..9208982
 +      });
 +    });
 +    expect(container.querySelector('mark')!.textContent).toBe('第一页正文。');
-+    expect(screen.getByRole('button', { name: 'Pause' })).toBeTruthy();
++    expect(screen.queryByRole('button', { name: 'Pause' })).toBeNull();
++    expect(screen.queryByRole('button', { name: 'Read Aloud' })).toBeNull();
++    expect(container.querySelector('footer .pdf-reflow-player-host')).toBeTruthy();
 +    fireEvent.wheel(container.querySelector('article')!);
 +    expect(screen.getByRole('button', { name: 'Return to Current Speech' })).toBeTruthy();
 +    await act(async () => {
@@ -840,6 +860,115 @@ index 0000000..d290638
 +    expect(screen.getByTestId('reflow')).toBeTruthy();
 +  });
 +});
+diff --git a/apps/readest-app/src/__tests__/components/tts/TTSControl.test.tsx b/apps/readest-app/src/__tests__/components/tts/TTSControl.test.tsx
+index 30b8a98..24fc33b 100644
+--- a/apps/readest-app/src/__tests__/components/tts/TTSControl.test.tsx
++++ b/apps/readest-app/src/__tests__/components/tts/TTSControl.test.tsx
+@@ -1,5 +1,6 @@
+ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
+-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
++import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
++import { useTTSPlayerHostStore } from '@/store/ttsPlayerHostStore';
+ 
+ vi.mock('@/hooks/useTranslation', () => ({
+   useTranslation: () => (key: string) => key,
+@@ -56,11 +57,23 @@ vi.mock('@/app/reader/components/tts/TTSPlayerSheet', () => ({
+   default: ({
+     isOpen,
+     activeSectionIndex,
++    onSetRate,
++    onSeek,
++    onClose,
+   }: {
+     isOpen: boolean;
+     activeSectionIndex: number | null;
++    onSetRate: (rate: number) => void;
++    onSeek: (seconds: number) => void;
++    onClose: () => void;
+   }) =>
+-    isOpen ? <div data-testid='player-sheet' data-active-section={activeSectionIndex} /> : null,
++    isOpen ? (
++      <div data-testid='player-sheet' data-active-section={activeSectionIndex}>
++        <button onClick={() => onSetRate(1.5)}>Rate 1.5</button>
++        <button onClick={() => onSeek(42)}>Seek 42</button>
++        <button onClick={onClose}>Close Player</button>
++      </div>
++    ) : null,
+ }));
+ 
+ import TTSControl from '@/app/reader/components/tts/TTSControl';
+@@ -102,6 +115,8 @@ describe('TTSControl', () => {
+ 
+   afterEach(() => {
+     cleanup();
++    useTTSPlayerHostStore.setState({ hosts: {} });
++    document.querySelectorAll('[data-test-host]').forEach((host) => host.remove());
+     vi.clearAllMocks();
+   });
+ 
+@@ -154,6 +169,37 @@ describe('TTSControl', () => {
+     expect(screen.getByTestId('player-sheet').getAttribute('data-active-section')).toBe('2');
+   });
+ 
++  test('borrows the original player in reflow and returns it without remounting the owner', () => {
++    const { container } = render(<TTSControl bookKey='b1' gridInsets={gridInsets} />);
++    const host = document.createElement('div');
++    host.dataset['testHost'] = 'true';
++    document.body.append(host);
++    act(() => useTTSPlayerHostStore.getState().setHost('b1', host));
++    expect(host.contains(screen.getByTestId('mini-player'))).toBe(true);
++    expect(container.querySelector('[data-testid="mini-player"]')).toBeNull();
++    fireEvent.click(screen.getByTestId('mini-player'));
++    expect(host.contains(screen.getByTestId('player-sheet'))).toBe(true);
++    fireEvent.click(screen.getByText('Rate 1.5'));
++    fireEvent.click(screen.getByText('Seek 42'));
++    expect(ttsState['handleSetRate']).toHaveBeenCalledWith(1.5);
++    expect(ttsState['handleSeekTo']).toHaveBeenCalledWith(42);
++    act(() => useTTSPlayerHostStore.getState().clearHost('b1', host));
++    expect(container.contains(screen.getByTestId('player-sheet'))).toBe(true);
++    expect(host.childElementCount).toBe(0);
++    fireEvent.click(screen.getByText('Close Player'));
++    expect(container.contains(screen.getByTestId('mini-player'))).toBe(true);
++  });
++
++  test('a stale host cleanup cannot detach a newer reflow host', () => {
++    const first = document.createElement('div');
++    const second = document.createElement('div');
++    const store = useTTSPlayerHostStore.getState();
++    store.setHost('b1', first);
++    store.setHost('b1', second);
++    store.clearHost('b1', first);
++    expect(useTTSPlayerHostStore.getState().hosts['b1']).toBe(second);
++  });
++
+   test('shows the back-to-TTS-location pill when reading has drifted', () => {
+     Object.assign(ttsState, { showBackToCurrentTTSLocation: true });
+     render(<TTSControl bookKey='b1' gridInsets={gridInsets} />);
+diff --git a/apps/readest-app/src/__tests__/components/tts/TTSMiniPlayer.test.tsx b/apps/readest-app/src/__tests__/components/tts/TTSMiniPlayer.test.tsx
+index a6fcea0..cb74728 100644
+--- a/apps/readest-app/src/__tests__/components/tts/TTSMiniPlayer.test.tsx
++++ b/apps/readest-app/src/__tests__/components/tts/TTSMiniPlayer.test.tsx
+@@ -97,6 +97,20 @@ describe('TTSMiniPlayer', () => {
+     vi.unstubAllGlobals();
+   });
+ 
++  test('docked card uses flow height and exposes playback settings in full style', () => {
++    const props = makeProps({ docked: true });
++    const { container } = render(<TTSMiniPlayer {...props} />);
++    const player = container.firstElementChild as HTMLElement;
++    expect(player.className).toContain('relative');
++    expect(player.className).not.toContain('absolute');
++    expect(player.style.bottom).toBe('');
++    expect(player.style.marginBottom).toBe('');
++    fireEvent.click(screen.getByLabelText('Playback settings'));
++    expect(props.onExpand).toHaveBeenCalledOnce();
++    fireEvent.click(screen.getByLabelText('Next Sentence'));
++    expect(props.onForward).toHaveBeenCalledWith(true);
++  });
++
+   // #5310: the minimal card is down to one time. Elapsed is the half nobody
+   // listens by, and carrying both got the pair chopped off at any UI font size
+   // above 13px.
 diff --git a/apps/readest-app/src/__tests__/document/pdf-reflow-speech.test.ts b/apps/readest-app/src/__tests__/document/pdf-reflow-speech.test.ts
 new file mode 100644
 index 0000000..d04dc15
@@ -1981,11 +2110,12 @@ index 58f1135..920edc4 100644
                <SyncInfoDialog
 diff --git a/apps/readest-app/src/app/reader/components/PdfReflowDialog.tsx b/apps/readest-app/src/app/reader/components/PdfReflowDialog.tsx
 new file mode 100644
-index 0000000..77b3b99
+index 0000000..cdc320b
 --- /dev/null
 +++ b/apps/readest-app/src/app/reader/components/PdfReflowDialog.tsx
-@@ -0,0 +1,416 @@
-+import { useEffect, useRef, useState } from 'react';
+@@ -0,0 +1,412 @@
++import { useEffect, useLayoutEffect, useRef, useState } from 'react';
++import { useTTSPlayerHostStore } from '@/store/ttsPlayerHostStore';
 +import { useThemeStore } from '@/store/themeStore';
 +import { eventDispatcher } from '@/utils/event';
 +import { useReflowNavigation } from '../hooks/useReflowNavigation';
@@ -2015,6 +2145,14 @@ index 0000000..77b3b99
 +  const [chromeVisible, setChromeVisible] = useState(false);
 +  const [settingsOpen, setSettingsOpen] = useState(false);
 +  const rootRef = useRef<HTMLDivElement>(null);
++  const playerHostRef = useRef<HTMLDivElement>(null);
++  useLayoutEffect(() => {
++    const host = playerHostRef.current;
++    if (!host) return;
++    const store = useTTSPlayerHostStore.getState();
++    store.setHost(bookKey, host);
++    return () => store.clearHost(bookKey, host);
++  }, [bookKey]);
 +  const exiting = useRef(false);
 +  const pointer = useRef<{
 +    x: number;
@@ -2323,32 +2461,19 @@ index 0000000..77b3b99
 +        </nav>
 +      </article>
 +      <footer className='pdf-reflow-dock' aria-label={_('Page Navigation')}>
++        <div ref={playerHostRef} className='pdf-reflow-player-host' />
 +        <div className='pdf-reflow-tts' role='group' aria-label={_('Read Aloud')}>
-+          <button
-+            type='button'
-+            disabled={tts.pending || !count}
-+            onClick={() => void tts.toggle()}
-+            aria-label={
-+              tts.state === 'playing'
-+                ? _('Pause')
-+                : tts.state === 'paused'
-+                  ? _('Resume')
-+                  : _('Read Aloud')
-+            }
-+          >
-+            {tts.pending
-+              ? _('Loading…')
-+              : tts.state === 'playing'
-+                ? _('Pause')
-+                : tts.state === 'paused'
-+                  ? _('Resume')
-+                  : _('Read Aloud')}
-+          </button>
-+          {(tts.state !== 'stopped' || tts.pending) && (
-+            <button type='button' onClick={tts.stop}>
-+              {_('Stop')}
++          {tts.state === 'stopped' && !tts.pending && (
++            <button
++              type='button'
++              disabled={tts.pending || !count}
++              onClick={() => void tts.toggle()}
++              aria-label={_('Read Aloud')}
++            >
++              {_('Read Aloud')}
 +            </button>
 +          )}
++          {tts.pending && <span role='status'>{_('Loading…')}</span>}
 +          {!tts.following && (tts.state !== 'stopped' || tts.pending) && (
 +            <button type='button' onClick={tts.returnToSpeech}>
 +              {_('Return to Current Speech')}
@@ -2570,6 +2695,144 @@ index 2f26925..eb9ff1f 100644
        style={{
          bottom: appService?.isAndroidApp
            ? `calc(env(safe-area-inset-bottom) + 64px)`
+diff --git a/apps/readest-app/src/app/reader/components/tts/TTSControl.tsx b/apps/readest-app/src/app/reader/components/tts/TTSControl.tsx
+index c6142a5..43cae56 100644
+--- a/apps/readest-app/src/app/reader/components/tts/TTSControl.tsx
++++ b/apps/readest-app/src/app/reader/components/tts/TTSControl.tsx
+@@ -7,6 +7,8 @@ import { useTTSControl } from '@/app/reader/hooks/useTTSControl';
+ import { useTTSDownloads } from '@/app/reader/hooks/useTTSDownloads';
+ import { Insets } from '@/types/misc';
+ import { eventDispatcher } from '@/utils/event';
++import { createPortal } from 'react-dom';
++import { useTTSPlayerHostStore } from '@/store/ttsPlayerHostStore';
+ import TTSMiniPlayer from './TTSMiniPlayer';
+ import TTSPlayerSheet from './TTSPlayerSheet';
+ import { useMiniPlayerAutoHide } from './useMiniPlayerAutoHide';
+@@ -20,6 +22,7 @@ const TTSControl: React.FC<TTSControlProps> = ({ bookKey, gridInsets }) => {
+   const _ = useTranslation();
+   const { safeAreaInsets } = useThemeStore();
+   const { getViewSettings } = useReaderStore();
++  const playerHost = useTTSPlayerHostStore((state) => state.hosts[bookKey]);
+ 
+   const [showPlayerSheet, setShowPlayerSheet] = useState(false);
+   const backButtonTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+@@ -73,9 +76,9 @@ const TTSControl: React.FC<TTSControlProps> = ({ bookKey, gridInsets }) => {
+     eventDispatcher.dispatch('tts-stop', { bookKey });
+   };
+ 
+-  return (
++  const player = (
+     <>
+-      {shouldMountBackButton && (
++      {!playerHost && shouldMountBackButton && (
+         <div
+           className={clsx(
+             'absolute left-1/2 top-0 z-50 -translate-x-1/2',
+@@ -107,7 +110,8 @@ const TTSControl: React.FC<TTSControlProps> = ({ bookKey, gridInsets }) => {
+           isPlaying={tts.isPlaying}
+           buffering={!tts.ttsClientsInited || tts.buffering}
+           isEink={isEink}
+-          visible={miniPlayerVisible}
++          visible={playerHost ? true : miniPlayerVisible}
++          docked={!!playerHost}
+           hasTimeline={hasTimeline}
+           audioTransport={audioTransport}
+           timeoutTimestamp={tts.timeoutTimestamp}
+@@ -156,6 +160,7 @@ const TTSControl: React.FC<TTSControlProps> = ({ bookKey, gridInsets }) => {
+       )}
+     </>
+   );
++  return playerHost ? createPortal(player, playerHost) : player;
+ };
+ 
+ export default TTSControl;
+diff --git a/apps/readest-app/src/app/reader/components/tts/TTSMiniPlayer.tsx b/apps/readest-app/src/app/reader/components/tts/TTSMiniPlayer.tsx
+index f8b039f..da39bfa 100644
+--- a/apps/readest-app/src/app/reader/components/tts/TTSMiniPlayer.tsx
++++ b/apps/readest-app/src/app/reader/components/tts/TTSMiniPlayer.tsx
+@@ -66,6 +66,8 @@ type TTSMiniPlayerProps = {
+   buffering: boolean;
+   isEink: boolean;
+   visible: boolean;
++  /** Reflow borrows this same card inside its flow-layout footer. */
++  docked?: boolean;
+   hasTimeline: boolean;
+   // A paired audiobook has no sentences to step by: the small step is the
+   // audiobook player's 30s forward / 15s back skip and the large step moves
+@@ -99,6 +101,7 @@ const TTSMiniPlayer = ({
+   buffering,
+   isEink,
+   visible,
++  docked = false,
+   hasTimeline,
+   audioTransport,
+   timeoutTimestamp,
+@@ -144,6 +147,10 @@ const TTSMiniPlayer = ({
+ 
+   const [panelTopOffset, setPanelTopOffset] = useState(0);
+   useLayoutEffect(() => {
++    if (docked) {
++      setPanelTopOffset(0);
++      return;
++    }
+     const cell = document.getElementById(`gridcell-${bookKey}`);
+     const footer = barVisible ? cell?.querySelector<HTMLElement>('.footer-bar') : null;
+     if (!cell || !footer) {
+@@ -173,7 +180,7 @@ const TTSMiniPlayer = ({
+     observer.observe(footer);
+     if (panel) observer.observe(panel);
+     return () => observer.disconnect();
+-  }, [barVisible, bottomBarTab, bookKey, safeAreaMargin]);
++  }, [barVisible, bottomBarTab, bookKey, safeAreaMargin, docked]);
+ 
+   const bottomOffset = viewSettings
+     ? getTTSMiniPlayerBottomOffset(viewSettings, { barVisible, usesMobileBar, panelTopOffset })
+@@ -213,14 +220,20 @@ const TTSMiniPlayer = ({
+       role='status'
+       aria-label={`${_('Reading aloud')}: ${book?.title ?? ''}`}
+       className={clsx(
+-        'absolute z-40 inset-x-4 sm:inset-x-0 sm:mx-auto sm:w-full sm:max-w-md',
++        docked
++          ? 'relative z-40 mx-auto w-full max-w-md'
++          : 'absolute z-40 inset-x-4 sm:inset-x-0 sm:mx-auto sm:w-full sm:max-w-md',
+         'transition-[bottom,opacity] duration-300',
+         visible ? 'pointer-events-auto opacity-100' : 'pointer-events-none opacity-0',
+       )}
+-      style={{
+-        bottom: `${bottomOffset}px`,
+-        marginBottom: `${safeAreaMargin}px`,
+-      }}
++      style={
++        docked
++          ? undefined
++          : {
++              bottom: `${bottomOffset}px`,
++              marginBottom: `${safeAreaMargin}px`,
++            }
++      }
+       onMouseEnter={() => !appService?.isMobile && setHoveredBookKey('')}
+       onTouchStart={() => !appService?.isMobile && setHoveredBookKey('')}
+     >
+@@ -275,6 +288,19 @@ const TTSMiniPlayer = ({
+                 )}
+               </div>
+             </div>
++            {docked && (
++              <button
++                type='button'
++                aria-label={_('Playback settings')}
++                onClick={onExpand}
++                className='shrink-0 rounded-full p-1'
++              >
++                <SpeedSettingsIcon
++                  size={iconSize26}
++                  label={formatRate(viewSettings?.ttsRate ?? 1.0)}
++                />
++              </button>
++            )}
+             {timerLabel && (
+               <span className='shrink-0 text-xs tabular-nums opacity-70'>{timerLabel}</span>
+             )}
 diff --git a/apps/readest-app/src/app/reader/hooks/usePdfReflowTTS.ts b/apps/readest-app/src/app/reader/hooks/usePdfReflowTTS.ts
 new file mode 100644
 index 0000000..73ad42d
@@ -2738,10 +3001,10 @@ index 0000000..73ad42d
 +}
 diff --git a/apps/readest-app/src/app/reader/hooks/useReflowNavigation.ts b/apps/readest-app/src/app/reader/hooks/useReflowNavigation.ts
 new file mode 100644
-index 0000000..48a6796
+index 0000000..2d39868
 --- /dev/null
 +++ b/apps/readest-app/src/app/reader/hooks/useReflowNavigation.ts
-@@ -0,0 +1,71 @@
+@@ -0,0 +1,75 @@
 +import { useEffect, useLayoutEffect, useRef, type RefObject } from 'react';
 +import { useEnv } from '@/context/EnvContext';
 +import { useDeviceControlStore } from '@/store/deviceStore';
@@ -2762,10 +3025,14 @@ index 0000000..48a6796
 +    root.current?.focus();
 +    const nativeBack = (event: CustomEvent) => {
 +      if (event.detail?.keyName !== 'Back') return false;
++      // A borrowed player sheet is nested in the reflow host. Let its own
++      // native Back listener dismiss it before this reader can exit.
++      if (root.current?.querySelector('dialog[open]')) return false;
 +      latest.current();
 +      return true;
 +    };
 +    const keyboard = (event: KeyboardEvent) => {
++      if (root.current?.querySelector('dialog[open]')) return;
 +      if (event.key === 'Escape') {
 +        event.preventDefault();
 +        event.stopImmediatePropagation();
@@ -3212,6 +3479,34 @@ index 240fc99..79f3a7a 100644
          }
        } catch {}
      }
+diff --git a/apps/readest-app/src/store/ttsPlayerHostStore.ts b/apps/readest-app/src/store/ttsPlayerHostStore.ts
+new file mode 100644
+index 0000000..e510fc0
+--- /dev/null
++++ b/apps/readest-app/src/store/ttsPlayerHostStore.ts
+@@ -0,0 +1,22 @@
++import { create } from 'zustand';
++
++/** Visual host only: the reader's TTSControl remains the sole session owner.
++ * A reflow overlay borrows its existing player rather than starting a controller. */
++interface TTSPlayerHostState {
++  hosts: Record<string, HTMLElement>;
++  setHost: (bookKey: string, host: HTMLElement) => void;
++  clearHost: (bookKey: string, host: HTMLElement) => void;
++}
++
++export const useTTSPlayerHostStore = create<TTSPlayerHostState>((set) => ({
++  hosts: {},
++  setHost: (bookKey, host) => set((state) => ({ hosts: { ...state.hosts, [bookKey]: host } })),
++  clearHost: (bookKey, host) =>
++    set((state) => {
++      // A late cleanup must not remove a newer reader's host for the same book.
++      if (state.hosts[bookKey] !== host) return state;
++      const hosts = { ...state.hosts };
++      delete hosts[bookKey];
++      return { hosts };
++    }),
++}));
 diff --git a/apps/readest-app/src/styles/dialog-polish.css b/apps/readest-app/src/styles/dialog-polish.css
 new file mode 100644
 index 0000000..3af3154
@@ -3420,10 +3715,10 @@ index 0000000..9961e02
 +}
 diff --git a/apps/readest-app/src/styles/pdf-reflow.css b/apps/readest-app/src/styles/pdf-reflow.css
 new file mode 100644
-index 0000000..4f66268
+index 0000000..3058369
 --- /dev/null
 +++ b/apps/readest-app/src/styles/pdf-reflow.css
-@@ -0,0 +1,242 @@
+@@ -0,0 +1,253 @@
 +.pdf-reflow-reader {
 +  position: absolute;
 +  inset: 0;
@@ -3458,8 +3753,8 @@ index 0000000..4f66268
 +  justify-content: space-between;
 +  gap: 8px;
 +}
-+.pdf-reflow-reader button,
-+.pdf-reflow-reader select,
++.pdf-reflow-reader button:not(.pdf-reflow-player-host *),
++.pdf-reflow-reader select:not(.pdf-reflow-player-host *),
 +.pdf-reflow-pagination input {
 +  min-height: 44px;
 +  border: 1px solid var(--color-base-300);
@@ -3469,13 +3764,13 @@ index 0000000..4f66268
 +  background: var(--color-base-100);
 +  font-size: 14px;
 +}
-+.pdf-reflow-reader button:disabled {
++.pdf-reflow-reader button:not(.pdf-reflow-player-host *):disabled {
 +  opacity: 0.4;
 +  cursor: default;
 +}
-+.pdf-reflow-reader button:focus-visible,
++.pdf-reflow-reader button:not(.pdf-reflow-player-host *):focus-visible,
 +.pdf-reflow-reader input:focus-visible,
-+.pdf-reflow-reader select:focus-visible {
++.pdf-reflow-reader select:not(.pdf-reflow-player-host *):focus-visible {
 +  outline: 2px solid var(--color-primary) !important;
 +  outline-offset: 2px;
 +}
@@ -3632,10 +3927,21 @@ index 0000000..4f66268
 +html[data-eink='true'] .pdf-reflow-controls {
 +  box-shadow: none;
 +}
-+html[data-eink='true'] .pdf-reflow-reader button:disabled {
++html[data-eink='true'] .pdf-reflow-reader button:not(.pdf-reflow-player-host *):disabled {
 +  opacity: 1;
 +  color: var(--color-base-content);
 +  border-style: dashed;
++}
++
++/* The original player occupies real footer height, never overlays the article.
++   Its sheet stays in this overlay's stacking context and uses its own styling. */
++.pdf-reflow-player-host {
++  flex: 0 0 100%;
++  min-width: 0;
++  font-family: var(--font-sans);
++}
++.pdf-reflow-player-host:empty {
++  display: none;
 +}
 +
 +/* Read-aloud transport stays reachable when the reading chrome is hidden. */
@@ -4235,10 +4541,10 @@ index 0000000..f011f89
 +}
 diff --git a/docs/pdf-reflow.md b/docs/pdf-reflow.md
 new file mode 100644
-index 0000000..2a260ad
+index 0000000..6d96705
 --- /dev/null
 +++ b/docs/pdf-reflow.md
-@@ -0,0 +1,66 @@
+@@ -0,0 +1,76 @@
 +# PDF 文字重排（单栏文字版）
 +
 +## 入口与使用
@@ -4251,7 +4557,7 @@ index 0000000..2a260ad
 +- Android系统返回或Escape：若设置展开先收起，否则直接返回书架，不依赖PDF跳页。工具栏另有返回书架按钮。
 +- 「返回对应原页」是独立操作：立即退出重排，再请求原版跳页；失败仅toast提示，不允许跳页卡死阻止用户退出。
 +- 原文件页码含封面；示例书 PDF 第17页对应印刷第16页。
-+- 底部「朗读」从当前物理页开始，复用现有听书引擎/语音设置；暂停、继续、停止保持可触达。当前真实朗读词/句高亮，自动滚动并跟随进入下一物理页。
++- 底部「朗读」从当前物理页开始。启动后显示与原版共用的听书卡片和完整听书面板：上一句/下一句、播放/暂停、停止，展开卡片或「播放设置」可调整倍速、声音、定时，以及语音引擎支持时的进度拖动/歌词位置。无时间线引擎不显示伪造的时间进度。当前真实朗读词/句高亮，自动滚动并跟随进入下一物理页。
 +- 手动翻页、滑动、鼠标滚轮或导航键暂停视觉跟随，不暂停声音；「回到正在朗读」恢复跟随。切回 PDF 不停止音频，返回书架沿用原有退出行为。
 +- 高亮通过控制器实际 Range 与 PDF 字符流来源映射，不按全文重复句搜索、不模拟逐字时间戳；语音引擎无词边界则以句子标示，文字层经转换不一致时不冒险高亮。听书仍采用原有 PDF 文字层顺序，复杂版式不保证与视觉重排顺序一致。
 +- 不连续拼接跨页段落、不生成新书、不修改 PDF，不映射重排文字上的笔记；原版仍可使用已有功能。
@@ -4305,6 +4611,16 @@ index 0000000..2a260ad
 +- 16相关测试文件315项通过，全项目TypeScript5.9通过，5实现文件Biome通过。PDF组件测试改用真实fixed-layout风格的index（无primaryIndex）；新增页0成功无toast、页不符仍报错、底部容器外置及4页码接口tests。
 +- 真实WebView CSS夹具在412×915、320×700、915×412，工具栏显示/隐藏、跟随/脱离12种组合测量：article底边不超过footer顶边，末行完整可滚入视口，按钮均在footer内部，无横向溢出。320宽分页换行亦不覆盖正文。此为实际CSS布局验证，非更新APK真机验收。
 +- 本轮只修真机报告第1/3项，第2项非预期跟随暂停未修复；不把这些局部修改宣称为跟随稳定性全面通过。
++
++## 20006 后统一听书界面
++
++- 重排注册按 bookKey 隔离的视觉宿主，原版已挂载的 TTSControl 将同一 TTSMiniPlayer/TTSPlayerSheet portal 进去；不在重排创建第二个 useTTSControl、控制器或播放会话。关闭重排只清理宿主，原版控件接续显示。
++- 活跃会话不再显示重排自制的暂停/继续/停止按钮；共用卡片在 footer 内使用静态流布局，不随原版工具栏自动消失。完整样式增加显式「播放设置」入口；原版外观布局及最简模式设置不变。
++- 完整听书面板提供现有倍速/声音/定时/进度功能；重排 Back/Escape/Tab 给嵌套 dialog 让位，先关闭听书面板，不直接回书架。重排按钮 CSS 排除宿主内控件，避免污染共用播放器外观。
++- 4个核心控件测试文件85项通过，全项目 TypeScript5.9 和5实现文件 Biome通过。扩大相关回归53文件：50文件734项通过，3个缓存文件55项受 Turso native binding 缺失阻断；排除这3个环境不兼容文件后重跑50文件731项全过，未声称全量通过。
++- 独立WebView夹具使用真实重排CSS/代表性听书卡片，412×915及320×700均无正文/底栏相交、末行可见、无横向溢出、播放器按钮不受重排边框污染。此不是完整应用或APK验收，横屏本轮未完成验证。
++- 最终云构建同范围21文件392项全过，全项目TypeScript5.9再次通过。
++- 未修改段落重建、音频引擎或此前未解决的偶发跟随脱离；APK安装后的 UI、声音、倍速、进度和跨页仍待真机验收。
 diff --git a/docs/reading-polish.md b/docs/reading-polish.md
 new file mode 100644
 index 0000000..0f03691
