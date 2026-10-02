@@ -7,9 +7,22 @@ import shutil
 
 root = Path('source/apps/readest-app')
 android = root / 'src-tauri/gen/android'
-# android init + git restore can replace launcher XML or retain upstream
-# monochrome assets. Copy the complete generated icon set AFTER restore.
-shutil.copytree(root / 'src-tauri/icons/android', android / 'app/src/main/res', dirs_exist_ok=True)
+# Tauri writes into gen/android/app/src/main/res when scaffolding exists.
+# The workflow runs icon generation AFTER git restore. Never copy the stale
+# upstream icons/android directory over the newly generated private artwork.
+from PIL import Image
+res = android / 'app/src/main/res'
+foreground = Image.open('branding/android-foreground.png').convert('RGBA')
+for density, size in [('mdpi', 108), ('hdpi', 162), ('xhdpi', 216), ('xxhdpi', 324), ('xxxhdpi', 432)]:
+    actual = Image.open(res / f'mipmap-{density}/ic_launcher_foreground.png').convert('RGBA')
+    expected = foreground.resize((size, size), Image.Resampling.LANCZOS)
+    assert actual.size == expected.size
+    # Independent visual fingerprint catches accidentally restored old artwork.
+    from PIL import ImageChops, ImageStat
+    difference = ImageStat.Stat(ImageChops.difference(actual, expected)).mean
+    assert max(difference) < 3, (density, difference)
+    for stale in (res / f'mipmap-{density}').glob('*monochrome*'):
+        stale.unlink()
 # Do not ship an old Readest-themed monochrome icon under Android 13+.
 icon_xml = android / 'app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml'
 icon_tree = ET.parse(icon_xml)

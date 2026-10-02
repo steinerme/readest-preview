@@ -72,7 +72,7 @@ jobs:
         working-directory: source
         run: |
           node node_modules/typescript/lib/tsc.js --noEmit -p apps/readest-app/tsconfig.json
-          pnpm --filter @readest/readest-app test --run --maxWorkers=2 src/__tests__/components/pdf-default-reflow.test.tsx src/__tests__/components/HeaderBar.test.tsx src/__tests__/components/PdfReflowDialog.test.tsx src/__tests__/utils/pdfReflow.test.ts src/__tests__/utils/pdfRendererPage.test.ts src/__tests__/foliate-pdf-reflow.test.ts src/__tests__/hooks/usePdfReflowTTS.test.tsx src/__tests__/utils/pdfReflowTTS.test.ts src/__tests__/document/pdf-tts.test.ts src/__tests__/document/pdf-reflow-speech.test.ts src/__tests__/services/tts-controller.test.ts src/__tests__/services/tts-controller-lifecycle.test.ts src/__tests__/services/tts-controller-detach.test.ts src/__tests__/services/tts-word-highlight.test.ts src/__tests__/hooks/useTTSControl.test.tsx src/__tests__/services/tts-inline-annotations.test.ts src/__tests__/components/tts/TTSControl.test.tsx src/__tests__/components/tts/TTSMiniPlayer.test.tsx src/__tests__/components/tts/TTSPlayerSheet.test.tsx src/__tests__/components/tts/TTSScrubber.test.tsx src/__tests__/components/tts/SpeedRuler.test.tsx src/__tests__/components/pdf-shared-footer.test.tsx src/__tests__/components/pdf-reflow-bookmark.test.tsx src/__tests__/components/page-jump-input.test.tsx src/__tests__/components/font-layout-panel.test.tsx src/__tests__/utils/pdfReflowSelection.test.ts src/__tests__/components/annotator/AnnotatorLookupSurfaces.test.tsx
+          pnpm --filter @readest/readest-app test --run --maxWorkers=2 src/__tests__/components/pdf-default-reflow.test.tsx src/__tests__/components/HeaderBar.test.tsx src/__tests__/components/PdfReflowDialog.test.tsx src/__tests__/utils/pdfReflow.test.ts src/__tests__/utils/pdfRendererPage.test.ts src/__tests__/foliate-pdf-reflow.test.ts src/__tests__/hooks/usePdfReflowTTS.test.tsx src/__tests__/utils/pdfReflowTTS.test.ts src/__tests__/document/pdf-tts.test.ts src/__tests__/document/pdf-reflow-speech.test.ts src/__tests__/services/tts-controller.test.ts src/__tests__/services/tts-controller-lifecycle.test.ts src/__tests__/services/tts-controller-detach.test.ts src/__tests__/services/tts-word-highlight.test.ts src/__tests__/hooks/useTTSControl.test.tsx src/__tests__/services/tts-inline-annotations.test.ts src/__tests__/components/tts/TTSControl.test.tsx src/__tests__/components/tts/TTSMiniPlayer.test.tsx src/__tests__/components/tts/TTSPlayerSheet.test.tsx src/__tests__/components/tts/TTSScrubber.test.tsx src/__tests__/components/tts/SpeedRuler.test.tsx src/__tests__/components/pdf-shared-footer.test.tsx src/__tests__/components/pdf-reflow-bookmark.test.tsx src/__tests__/components/page-jump-input.test.tsx src/__tests__/components/font-layout-panel.test.tsx src/__tests__/utils/pdfReflowSelection.test.ts src/__tests__/components/annotator/AnnotatorLookupSurfaces.test.tsx src/__tests__/app/reader/hooks/usePagination-mediaTap.test.ts
       - name: Load private custom branding
         env:
           PREVIEW_BRANDING_PASSWORD: ${{ secrets.PREVIEW_BRANDING_PASSWORD }}
@@ -88,8 +88,10 @@ jobs:
         run: |
           rm -rf src-tauri/gen/android
           pnpm tauri android init --ci
-          pnpm tauri icon ../../../branding/icon.json
           git restore -- src-tauri/gen/android
+          # tauri icon writes directly into gen/android when it exists.
+          # Generate AFTER restore; icons/android still contains upstream art.
+          pnpm tauri icon ../../../branding/icon.json
       - name: Configure separate preview app
         run: python3 prepare_preview.py
       - name: Load private preview signing key
@@ -129,6 +131,12 @@ jobs:
           assert "package: name='com.bilingify.readest.preview'" in info
           assert "native-code: 'arm64-v8a'" in info
           PY
+          # Decode the final signed APK and compare packaged launcher pixels.
+          curl -fL https://github.com/iBotPeaches/Apktool/releases/download/v2.12.0/apktool_2.12.0.jar -o "$RUNNER_TEMP/apktool.jar"
+          echo 'effb69dab2f93806cafc0d232f6be32c2551b8d51c67650f575e46c016908fdd  '"$RUNNER_TEMP/apktool.jar" | sha256sum -c -
+          java -jar "$RUNNER_TEMP/apktool.jar" d -f -s artifacts/Readest-Preview-arm64.apk -o "$RUNNER_TEMP/final-apk"
+          python3 verify_apk_branding.py "$RUNNER_TEMP/final-apk" > artifacts/branding-verification.txt
+          cat artifacts/branding-verification.txt
           cd artifacts && sha256sum Readest-Preview-arm64.apk > SHA256SUMS.txt
       - uses: actions/upload-artifact@v4
         with:

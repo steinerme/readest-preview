@@ -29,6 +29,67 @@ index 59cd398..079026b 100644
 +  "Switch to PDF": "切换为 PDF",
 +  "Return to Current Speech": "回到正在朗读"
  }
+diff --git a/apps/readest-app/src/__tests__/app/reader/hooks/usePagination-mediaTap.test.ts b/apps/readest-app/src/__tests__/app/reader/hooks/usePagination-mediaTap.test.ts
+index 750e78a..facc920 100644
+--- a/apps/readest-app/src/__tests__/app/reader/hooks/usePagination-mediaTap.test.ts
++++ b/apps/readest-app/src/__tests__/app/reader/hooks/usePagination-mediaTap.test.ts
+@@ -4,6 +4,10 @@ import { act, cleanup, renderHook } from '@testing-library/react';
+ const h = vi.hoisted(() => ({
+   viewSettings: { scrolled: false } as Record<string, unknown>,
+   setHoveredBookKey: vi.fn(),
++  reflow: false,
++}));
++vi.mock('@/store/pdfReflowStore', () => ({
++  usePdfReflowStore: { getState: () => ({ sessions: h.reflow ? { 'book-1': {} } : {} }) },
+ }));
+ 
+ vi.mock('@/utils/bridge', () => ({
+@@ -74,12 +78,13 @@ const setup = () => {
+       );
+     });
+   };
+-  return { view, tap };
++  return { view, tap, result };
+ };
+ 
+ let postSpy: ReturnType<typeof vi.spyOn>;
+ 
+ beforeEach(() => {
++  h.reflow = false;
+   h.viewSettings = { scrolled: false };
+   h.setHoveredBookKey.mockClear();
+   postSpy = vi.spyOn(window, 'postMessage').mockImplementation(() => {});
+@@ -91,6 +96,30 @@ afterEach(() => {
+ });
+ 
+ describe('usePagination tap on a page-filling image (#6424)', () => {
++  test('hidden PDF ignores iframe clicks everywhere during reflow, then resumes on closing', async () => {
++    const { view, tap } = setup();
++    h.reflow = true;
++    for (const x of [100, 400, 500, 600, 900]) await tap(x);
++    expect(view.next).not.toHaveBeenCalled();
++    expect(view.prev).not.toHaveBeenCalled();
++    expect(h.setHoveredBookKey).not.toHaveBeenCalled();
++    expect(postSpy).not.toHaveBeenCalled();
++    h.reflow = false;
++    await tap(900);
++    expect(view.next).toHaveBeenCalledOnce();
++  });
++  test('hidden PDF also ignores a direct compatibility click during reflow', async () => {
++    const { view, result } = setup();
++    h.reflow = true;
++    await act(async () => {
++      await result.current.handlePageFlip({ type: 'click', clientX: 900 } as unknown as Parameters<
++        typeof result.current.handlePageFlip
++      >[0]);
++    });
++    expect(view.next).not.toHaveBeenCalled();
++    expect(view.prev).not.toHaveBeenCalled();
++    expect(h.setHoveredBookKey).not.toHaveBeenCalled();
++  });
+   test('a tap in the right page-turn zone turns the page', async () => {
+     const { view, tap } = setup();
+     await tap(900);
 diff --git a/apps/readest-app/src/__tests__/components/Dialog.test.tsx b/apps/readest-app/src/__tests__/components/Dialog.test.tsx
 new file mode 100644
 index 0000000..180455a
@@ -219,10 +280,10 @@ index f87ff3c..74afc29 100644
  describe('HeaderBar sidebar toggle', () => {
 diff --git a/apps/readest-app/src/__tests__/components/PdfReflowDialog.test.tsx b/apps/readest-app/src/__tests__/components/PdfReflowDialog.test.tsx
 new file mode 100644
-index 0000000..737878c
+index 0000000..e129002
 --- /dev/null
 +++ b/apps/readest-app/src/__tests__/components/PdfReflowDialog.test.tsx
-@@ -0,0 +1,447 @@
+@@ -0,0 +1,464 @@
 +import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 +import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 +import PdfReflowDialog from '@/app/reader/components/PdfReflowDialog';
@@ -412,7 +473,7 @@ index 0000000..737878c
 +    });
 +    fireEvent.click(article, { clientX: x, clientY: 200 });
 +  };
-+  it('right and left thirds turn physical pages through the shared service without toggling chrome', async () => {
++  it('right and left quarters turn physical pages through the shared service without toggling chrome', async () => {
 +    const r = render(<PdfReflowDialog bookKey='pdf-1' onClose={vi.fn()} />);
 +    await screen.findByText('第一页正文。');
 +    const article = r.container.querySelector('article')!;
@@ -426,7 +487,24 @@ index 0000000..737878c
 +    expect(mocks.goTo).toHaveBeenLastCalledWith(0);
 +    expect(mocks.setHovered).not.toHaveBeenCalled();
 +  });
-+  it('middle third opens and closes the same shared chrome', async () => {
++  it('middle half including both exact boundaries never turns pages or bubbles to another reader', async () => {
++    const outer = vi.fn();
++    const r = render(
++      <div onClick={outer}>
++        <PdfReflowDialog bookKey='pdf-1' onClose={vi.fn()} />
++      </div>,
++    );
++    const text = await screen.findByText('第一页正文。');
++    const article = r.container.querySelector('article')!;
++    tapArticle(article, 400); // establish actual article bounds with a side offset
++    for (const x of [250, 280, 320, 400, 480, 520, 550]) {
++      fireEvent.click(text, { clientX: x, clientY: 200 });
++    }
++    expect(mocks.goTo).not.toHaveBeenCalled();
++    expect(outer).not.toHaveBeenCalled();
++    expect(usePdfReflowStore.getState().sessions['pdf-1']?.page).toBe(0);
++  });
++  it('middle half opens and closes the same shared chrome', async () => {
 +    mocks.hovered = 'pdf-1';
 +    const r = render(<PdfReflowDialog bookKey='pdf-1' onClose={vi.fn()} />);
 +    await screen.findByText('第一页正文。');
@@ -2698,10 +2776,10 @@ index 58f1135..fdbed0f 100644
                <SyncInfoDialog
 diff --git a/apps/readest-app/src/app/reader/components/PdfReflowDialog.tsx b/apps/readest-app/src/app/reader/components/PdfReflowDialog.tsx
 new file mode 100644
-index 0000000..f30e243
+index 0000000..08ae134
 --- /dev/null
 +++ b/apps/readest-app/src/app/reader/components/PdfReflowDialog.tsx
-@@ -0,0 +1,584 @@
+@@ -0,0 +1,587 @@
 +import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 +import { useTTSPlayerHostStore } from '@/store/ttsPlayerHostStore';
 +import { useThemeStore } from '@/store/themeStore';
@@ -3130,6 +3208,9 @@ index 0000000..f30e243
 +          }
 +        }}
 +        onClick={(e) => {
++          // Portal events can bubble through the React owner tree. Reflow
++          // alone owns its taps; never let the hidden PDF paginate as well.
++          e.stopPropagation();
 +          const p = pointer.current;
 +          pointer.current = null;
 +          if (
@@ -3143,11 +3224,11 @@ index 0000000..f30e243
 +          const { left, width } = e.currentTarget.getBoundingClientRect();
 +          const x = e.clientX - left;
 +          if (width > 0 && x >= 0 && x <= width) {
-+            if (x < width / 3) {
++            if (x < width / 4) {
 +              if (!busy && page > 0) goPage(page - 1);
 +              return;
 +            }
-+            if (x > (width * 2) / 3) {
++            if (x > (width * 3) / 4) {
 +              if (!busy && page < count - 1) goPage(page + 1);
 +              return;
 +            }
@@ -3978,6 +4059,34 @@ index f8b039f..f50c27c 100644
              {timerLabel && (
                <span className='shrink-0 text-xs tabular-nums opacity-70'>{timerLabel}</span>
              )}
+diff --git a/apps/readest-app/src/app/reader/hooks/usePagination.ts b/apps/readest-app/src/app/reader/hooks/usePagination.ts
+index 6b32281..e789192 100644
+--- a/apps/readest-app/src/app/reader/hooks/usePagination.ts
++++ b/apps/readest-app/src/app/reader/hooks/usePagination.ts
+@@ -3,6 +3,7 @@ import { useEnv } from '@/context/EnvContext';
+ import { FoliateView } from '@/types/view';
+ import { ViewSettings } from '@/types/book';
+ import { useReaderStore } from '@/store/readerStore';
++import { usePdfReflowStore } from '@/store/pdfReflowStore';
+ import { useBookDataStore } from '@/store/bookDataStore';
+ import { useDeviceControlStore } from '@/store/deviceStore';
+ import { useSettingsStore } from '@/store/settingsStore';
+@@ -221,6 +222,15 @@ export const usePagination = (
+   const handlePageFlip = async (
+     msg: MessageEvent | CustomEvent | React.MouseEvent<HTMLDivElement, MouseEvent>,
+   ) => {
++    // The hidden original reader remains mounted for shared services. Its
++    // direct/iframe compatibility clicks must not turn behind the reflow view.
++    // Keyboard and wheel events keep their original ownership.
++    if (
++      usePdfReflowStore.getState().sessions[bookKey] &&
++      (msg.type === 'click' ||
++        (msg instanceof MessageEvent && msg.data?.type === 'iframe-single-click'))
++    )
++      return;
+     const viewState = getViewState(bookKey);
+     const bookData = getBookData(bookKey);
+     if (!viewState?.inited || !bookData) return;
 diff --git a/apps/readest-app/src/app/reader/hooks/usePdfReflowTTS.ts b/apps/readest-app/src/app/reader/hooks/usePdfReflowTTS.ts
 new file mode 100644
 index 0000000..73ad42d
