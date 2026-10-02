@@ -2436,6 +2436,51 @@ index 0000000..ae52edc
 +    expect(m.answer).not.toHaveBeenCalled();
 +  });
 +});
+diff --git a/apps/readest-app/src/__tests__/components/settings-overscroll.test.tsx b/apps/readest-app/src/__tests__/components/settings-overscroll.test.tsx
+index 45d823c..6848edd 100644
+--- a/apps/readest-app/src/__tests__/components/settings-overscroll.test.tsx
++++ b/apps/readest-app/src/__tests__/components/settings-overscroll.test.tsx
+@@ -49,7 +49,9 @@ vi.mock('@/components/settings/ThemePanel', () => ({ default: () => null }));
+ vi.mock('@/components/settings/ControlPanel', () => ({ default: () => null }));
+ vi.mock('@/components/settings/TTSPanel', () => ({ default: () => null }));
+ vi.mock('@/components/settings/LangPanel', () => ({ default: () => null }));
+-vi.mock('@/components/settings/AIPanel', () => ({ default: () => null }));
++vi.mock('@/components/settings/AIPanel', () => ({
++  default: () => <div data-testid='ai-settings-panel'>AI settings</div>,
++}));
+ vi.mock('@/components/settings/IntegrationsPanel', () => ({ default: () => null }));
+ vi.mock('@/components/settings/MiscPanel', () => ({ default: () => null }));
+ 
+@@ -212,3 +214,29 @@ describe('Settings tab scrolling', () => {
+     expect(viewport.scrollTop).toBe(0);
+   });
+ });
++
++describe('Release AI settings entry', () => {
++  it('shows and opens AI Assistant from ordinary settings in production', () => {
++    vi.stubEnv('NODE_ENV', 'production');
++    try {
++      render(<SettingsDialog bookKey='' />);
++      const tab = screen.getByTitle('AI Assistant');
++      expect(tab).toBeTruthy();
++      fireEvent.click(tab);
++      expect(screen.getByTestId('ai-settings-panel')).toBeTruthy();
++    } finally {
++      vi.unstubAllEnvs();
++    }
++  });
++  it('restores the AI tab when ordinary settings reopen in production', () => {
++    vi.stubEnv('NODE_ENV', 'production');
++    try {
++      localStorage.setItem('lastConfigPanel', 'AI');
++      render(<SettingsDialog bookKey='' />);
++      expect(screen.getByTitle('AI Assistant')).toBeTruthy();
++      expect(screen.getByTestId('ai-settings-panel')).toBeTruthy();
++    } finally {
++      vi.unstubAllEnvs();
++    }
++  });
++});
 diff --git a/apps/readest-app/src/__tests__/components/tts/TTSControl.test.tsx b/apps/readest-app/src/__tests__/components/tts/TTSControl.test.tsx
 index 30b8a98..da43322 100644
 --- a/apps/readest-app/src/__tests__/components/tts/TTSControl.test.tsx
@@ -6792,6 +6837,20 @@ index f7ccf1b..4116629 100644
            {/* Embedding model — same /models listing as the LLM picker.
                OpenAI's /v1/models doesn't tag chat vs embedding, so the two
                selects share one list and the user picks the right one.
+diff --git a/apps/readest-app/src/components/settings/SettingsDialog.tsx b/apps/readest-app/src/components/settings/SettingsDialog.tsx
+index 87c350b..84c7b02 100644
+--- a/apps/readest-app/src/components/settings/SettingsDialog.tsx
++++ b/apps/readest-app/src/components/settings/SettingsDialog.tsx
+@@ -124,7 +124,8 @@ const SettingsDialog: React.FC<{ bookKey: string }> = ({ bookKey }) => {
+       tab: 'AI',
+       icon: PiRobot,
+       label: _('AI Assistant'),
+-      disabled: process.env.NODE_ENV === 'production',
++      // Preview ships reading AI in release APKs as well as development.
++      // Keep configuration discoverable even while AI itself is disabled.
+     },
+     {
+       tab: 'TTS',
 diff --git a/apps/readest-app/src/libs/document.ts b/apps/readest-app/src/libs/document.ts
 index 96f5ed9..985e83b 100644
 --- a/apps/readest-app/src/libs/document.ts
