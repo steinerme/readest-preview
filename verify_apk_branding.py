@@ -32,9 +32,14 @@ src_res = Path('source/apps/readest-app/src-tauri/gen/android/app/src/main/res')
 tts_icon = Path('source/apps/readest-app/src-tauri/plugins/tauri-plugin-native-tts/android/src/main/res/drawable/notification_icon.png')
 expected_splash = Image.open(src_res / 'drawable/splash_icon.png').convert('RGBA')
 expected_note = Image.open(tts_icon).convert('RGBA')
+def _flat(i):
+    bg = Image.new('RGBA', i.size, (128, 128, 128, 255))
+    return Image.alpha_composite(bg, i).convert('RGB')
 def same(a, b):
+    # aapt2 re-encodes PNGs to a palette, so allow small quantisation error.
+    # The upstream book art differs from the preview art by ~60-85 here.
     if a.size != b.size: return False
-    return max(ImageStat.Stat(ImageChops.difference(a, b)).mean) < 1
+    return max(ImageStat.Stat(ImageChops.difference(_flat(a), _flat(b))).mean) < 8
 found_splash = found_note = False
 for png in res.rglob('*.png'):
     if png.name.endswith('.9.png'): continue
