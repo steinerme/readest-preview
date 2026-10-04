@@ -30,6 +30,34 @@ for child in list(icon_tree.getroot()):
     if child.tag == 'monochrome':
         icon_tree.getroot().remove(child)
 icon_tree.write(icon_xml, encoding='utf-8', xml_declaration=True)
+# Window-background splash (shown while the activity is created, e.g. when
+# switching back from another app) and the media notification small icon were
+# still upstream's open-book artwork. Replace both with the preview artwork.
+from PIL import ImageChops as _IC, ImageDraw as _ID, ImageOps as _IO, ImageFilter as _IF
+_art = Image.open('branding/app-icon.png').convert('RGBA')
+_s = 432
+_splash = _art.resize((_s, _s), Image.Resampling.LANCZOS)
+_mask = Image.new('L', (_s * 4, _s * 4), 0)
+_ID.Draw(_mask).rounded_rectangle((0, 0, _s * 4 - 1, _s * 4 - 1), radius=int(_s * 4 * 0.22), fill=255)
+_mask = _mask.resize((_s, _s), Image.Resampling.LANCZOS)
+_splash.putalpha(_IC.multiply(_splash.getchannel('A'), _mask))
+_splash.save(res / 'drawable/splash_icon.png')
+# Status-bar icons are alpha masks: derive a legible silhouette from the artwork.
+_n = 96
+_im = _art.convert('RGB').resize((_n * 4, _n * 4), Image.Resampling.LANCZOS)
+_g = _IO.autocontrast(_im.convert('L'), cutoff=2)
+_sat = _im.convert('HSV').split()[1]
+_fig = _IC.lighter(_g.point(lambda p: 255 if p > 85 else 0), _sat.point(lambda p: 255 if p > 80 else 0)).filter(_IF.MedianFilter(9))
+_tone = _g.point(lambda p: int(255 * min(1, max(0, (p - 35) / 110)) ** 0.8))
+_alpha = _IC.multiply(_IC.lighter(_IC.multiply(_fig, _tone), _fig.point(lambda p: int(p * 0.62))), _g.point(lambda p: 0 if p < 48 else 255))
+_circle = Image.new('L', _im.size, 0)
+_ID.Draw(_circle).ellipse((0, 0, _im.size[0] - 1, _im.size[1] - 1), fill=255)
+_alpha = _IC.multiply(_alpha, _circle).resize((_n, _n), Image.Resampling.LANCZOS)
+_note = Image.new('RGBA', (_n, _n), (255, 255, 255, 0))
+_note.putalpha(_alpha)
+_tts = root / 'src-tauri/plugins/tauri-plugin-native-tts/android/src/main/res/drawable/notification_icon.png'
+assert _tts.exists()
+_note.save(_tts)
 # In-app/PWA icons use the same full square illustration.
 from PIL import Image
 image = Image.open('branding/app-icon.png')

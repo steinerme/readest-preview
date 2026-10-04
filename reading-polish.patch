@@ -11,10 +11,10 @@ index 8468f01..0cc5af0 100644
      "@ai-sdk/react": "^3.0.49",
      "@assistant-ui/react": "0.11.58",
 diff --git a/apps/readest-app/public/locales/zh-CN/translation.json b/apps/readest-app/public/locales/zh-CN/translation.json
-index 59cd398..079026b 100644
+index 59cd398..6284557 100644
 --- a/apps/readest-app/public/locales/zh-CN/translation.json
 +++ b/apps/readest-app/public/locales/zh-CN/translation.json
-@@ -2411,5 +2411,25 @@
+@@ -2411,5 +2411,27 @@
    "Sentence around the highlight": "高亮所在的句子",
    "Do not speak readings or Hanja glosses in parentheses after a word": "不朗读词语后括号内的读音或汉字注释",
    "Visible as {{name}}": "显示为 {{name}}",
@@ -29,6 +29,8 @@ index 59cd398..079026b 100644
 +  "Could not read this page. Please use the original PDF view.": "无法读取本页文字，请切回原版查看。",
 +  "This page may not reflow correctly. Please compare it with the original.": "本页可能无法准确重排，请对照原页阅读。",
 +  "No usable text on this page. View the original page; OCR is not included.": "本页没有可用文字，请查看原页。本版本不含 OCR。",
++  "Figure": "图",
++  "Figure could not be shown. Compare with the original page.": "此图无法显示，请对照原页。",
 +  "Could not return to this PDF page.": "无法跳转到对应原页，可关闭重排后手动定位。",
 +  "Original PDF Page": "PDF 原文件页码",
 +  "Reflow Settings": "重排设置",
@@ -1137,10 +1139,10 @@ index f87ff3c..fc06662 100644
      const { container } = renderHeader();
 diff --git a/apps/readest-app/src/__tests__/components/PdfReflowDialog.test.tsx b/apps/readest-app/src/__tests__/components/PdfReflowDialog.test.tsx
 new file mode 100644
-index 0000000..1f67527
+index 0000000..7d92446
 --- /dev/null
 +++ b/apps/readest-app/src/__tests__/components/PdfReflowDialog.test.tsx
-@@ -0,0 +1,568 @@
+@@ -0,0 +1,703 @@
 +import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 +import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 +import PdfReflowDialog from '@/app/reader/components/PdfReflowDialog';
@@ -1707,6 +1709,141 @@ index 0000000..1f67527
 +    await expect(
 +      usePdfReflowStore.getState().sessions['pdf-1']!.revealCitation!('real-cfi'),
 +    ).rejects.toThrow('Citation navigation failed');
++  });
++});
++
++describe('tables and figures in the reflow page', () => {
++  const tableData = () =>
++    Promise.resolve({
++      items: [
++        { str: '名称', transform: [12, 0, 0, 12, 66, 683], width: 24, height: 12 },
++        { str: '数量', transform: [12, 0, 0, 12, 206, 683], width: 24, height: 12 },
++        { str: '苹果', transform: [12, 0, 0, 12, 66, 659], width: 24, height: 12 },
++        { str: '12', transform: [12, 0, 0, 12, 206, 659], width: 12, height: 12 },
++      ],
++      width: 612,
++      height: 792,
++      rotation: 0,
++    });
++  const ops = {
++    save: 10,
++    restore: 11,
++    transform: 12,
++    constructPath: 91,
++    stroke: 20,
++    paintImageXObject: 85,
++  };
++  const rule = (x0: number, y0: number, x1: number, y1: number) => [
++    ops.stroke,
++    [new Float32Array([0, x0, y0, 1, x1, y1])],
++    null,
++  ];
++  const graphics = (withImage: boolean) =>
++    Promise.resolve({
++      fnArray: [
++        ...[0, 0, 0, 0, 0].map(() => ops.constructPath),
++        ...(withImage ? [ops.save, ops.transform, ops.paintImageXObject, ops.restore] : []),
++      ],
++      argsArray: [
++        rule(60, 700, 300, 700),
++        rule(60, 676, 300, 676),
++        rule(60, 652, 300, 652),
++        rule(60, 652, 60, 700),
++        rule(200, 652, 200, 700),
++        ...(withImage ? [null, [200, 0, 0, 120, 100, 300], ['img'], null] : []),
++      ],
++      ops,
++      width: 612,
++      height: 792,
++      origin: [0, 0],
++      rotation: 0,
++    });
++
++  it('renders a recognised table as a real table with header cells and keeps block indices', async () => {
++    mocks.pages = [
++      { getReflowText: vi.fn(tableData), getReflowGraphics: vi.fn(() => graphics(false)) } as never,
++    ];
++    const { container } = render(<PdfReflowDialog bookKey='pdf-1' onClose={vi.fn()} />);
++    await screen.findByText('苹果');
++    const table = container.querySelector('table.pdf-reflow-table')!;
++    expect(table).toBeTruthy();
++    expect(table.querySelectorAll('th')).toHaveLength(2);
++    expect(table.querySelectorAll('td')).toHaveLength(2);
++    expect(
++      Array.from(table.querySelectorAll('[data-reflow-block]')).map((e) =>
++        e.getAttribute('data-reflow-block'),
++      ),
++    ).toEqual(['0', '1', '2', '3']);
++    expect(container.querySelector('td[data-numeric]')?.textContent).toBe('12');
++  });
++
++  it('falls back to plain text when graphics extraction fails', async () => {
++    mocks.pages = [
++      {
++        getReflowText: vi.fn(tableData),
++        getReflowGraphics: vi.fn(() => Promise.reject(new Error('boom'))),
++      } as never,
++    ];
++    const { container } = render(<PdfReflowDialog bookKey='pdf-1' onClose={vi.fn()} />);
++    await screen.findByText(/名称/);
++    expect(container.querySelector('table')).toBeNull();
++    expect(container.querySelector('[role="alert"]')).toBeNull();
++  });
++
++  it('shows a lazily rendered figure and a tap on it neither turns pages nor reveals chrome', async () => {
++    const renderRegion = vi.fn(async () => 'blob:figure-1');
++    mocks.pages = [
++      {
++        getReflowText: vi.fn(() =>
++          Promise.resolve({ items: [], width: 612, height: 792, rotation: 0 }),
++        ),
++        getReflowGraphics: vi.fn(() =>
++          graphics(true).then((g) => ({
++            ...g,
++            fnArray: g.fnArray.slice(5),
++            argsArray: g.argsArray.slice(5),
++          })),
++        ),
++        renderReflowRegion: renderRegion,
++      } as never,
++      { getReflowText: vi.fn(() => textPage('第二页正文。')) },
++    ];
++    const { container } = render(<PdfReflowDialog bookKey='pdf-1' onClose={vi.fn()} />);
++    const image = await waitFor(() => {
++      const found = container.querySelector('figure.pdf-reflow-figure img');
++      expect(found).toBeTruthy();
++      return found as HTMLImageElement;
++    });
++    expect(image.getAttribute('src')).toBe('blob:figure-1');
++    expect(renderRegion).toHaveBeenCalledTimes(1);
++    expect(container.querySelector('figure')?.getAttribute('data-reflow-figure')).toBe('0');
++    mocks.setHovered.mockClear();
++    mocks.goTo.mockClear();
++    fireEvent.pointerDown(image, { clientX: 5, clientY: 5 });
++    fireEvent.pointerUp(image, { clientX: 5, clientY: 5 });
++    fireEvent.click(image, { clientX: 5, clientY: 5 });
++    await Promise.resolve();
++    expect(mocks.goTo).not.toHaveBeenCalled();
++  });
++
++  it('shows a visible notice when a figure cannot be rendered', async () => {
++    mocks.pages = [
++      {
++        getReflowText: vi.fn(() =>
++          Promise.resolve({ items: [], width: 612, height: 792, rotation: 0 }),
++        ),
++        getReflowGraphics: vi.fn(() =>
++          graphics(true).then((g) => ({
++            ...g,
++            fnArray: g.fnArray.slice(5),
++            argsArray: g.argsArray.slice(5),
++          })),
++        ),
++        renderReflowRegion: vi.fn(async () => null),
++      } as never,
++    ];
++    render(<PdfReflowDialog bookKey='pdf-1' onClose={vi.fn()} />);
++    expect(await screen.findByText(/could not be shown/i)).toBeTruthy();
 +  });
 +});
 diff --git a/apps/readest-app/src/__tests__/components/ReadingPanels.test.tsx b/apps/readest-app/src/__tests__/components/ReadingPanels.test.tsx
@@ -3237,12 +3374,151 @@ index 0000000..d04dc15
 +    expect(mapPdfSpeechRange(reflow, range!).length).toBeGreaterThan(0);
 +  });
 +});
+diff --git a/apps/readest-app/src/__tests__/fixtures/data/pdf-reflow/make_pdfs.py b/apps/readest-app/src/__tests__/fixtures/data/pdf-reflow/make_pdfs.py
+new file mode 100644
+index 0000000..0ba5055
+--- /dev/null
++++ b/apps/readest-app/src/__tests__/fixtures/data/pdf-reflow/make_pdfs.py
+@@ -0,0 +1,113 @@
++from reportlab.lib.pagesizes import A4
++from reportlab.pdfgen import canvas
++from reportlab.lib.utils import ImageReader
++from reportlab.pdfbase import pdfmetrics
++from reportlab.pdfbase.cidfonts import UnicodeCIDFont
++from PIL import Image
++import math
++
++pdfmetrics.registerFont(UnicodeCIDFont('STSong-Light'))
++W, H = A4
++OUT = __import__("os").path.dirname(__import__("os").path.abspath(__file__)) + "/"
++
++def para(c, x, y, lines, size=11, lead=15, font='Helvetica'):
++    c.setFont(font, size)
++    for line in lines:
++        c.drawString(x, y, line)
++        y -= lead
++    return y
++
++LOREM = ["The quick brown fox jumps over the lazy dog while the committee",
++         "reviews the quarterly report and discusses the numbers shown below.",
++         "Each figure was measured under identical laboratory conditions."]
++
++# 1. ruled grid table + paragraph + image
++c = canvas.Canvas(OUT + 'ruled.pdf', pagesize=A4)
++y = para(c, 60, H - 80, LOREM)
++rows = [["Region", "Q1", "Q2", "Q3"], ["North", "1,200", "1,350", "1,500"],
++        ["South", "980", "1,010", "1,120"], ["East", "1,450", "1,500", "1,610"]]
++x0, ytop = 60, y - 20
++cw, rh = [140, 90, 90, 90], 24
++c.setLineWidth(0.7)
++for r in range(len(rows) + 1):
++    c.line(x0, ytop - r * rh, x0 + sum(cw), ytop - r * rh)
++xx = x0
++for i in range(len(cw) + 1):
++    c.line(xx, ytop, xx, ytop - len(rows) * rh)
++    if i < len(cw): xx += cw[i]
++c.setFont('Helvetica', 11)
++for r, row in enumerate(rows):
++    xx = x0
++    for i, t in enumerate(row):
++        c.drawString(xx + 6, ytop - r * rh - 16, t)
++        xx += cw[i]
++y = ytop - len(rows) * rh - 30
++y = para(c, 60, y, ["Table 1 shows regional sales. The next paragraph continues the analysis."])
++img = Image.new('RGB', (30, 18), (230, 120, 60))
++for i in range(30):
++    for j in range(18):
++        img.putpixel((i, j), (int(255 * i / 30), int(255 * j / 18), 140))
++img.save(OUT + 'photo.png')
++c.drawImage(ImageReader(OUT + 'photo.png'), 100, y - 200, width=300, height=180)
++import os; os.remove(OUT + 'photo.png')
++para(c, 60, y - 230, ["Figure 1: gradient test image."])
++c.showPage(); c.save()
++
++# 2. booktabs (three horizontal rules only)
++c = canvas.Canvas(OUT + 'booktabs.pdf', pagesize=A4)
++y = para(c, 60, H - 80, LOREM)
++ytop = y - 15
++rows = [["Method", "Accuracy", "F1", "Params"], ["Baseline", "81.2", "79.8", "12M"],
++        ["Ours", "86.5", "85.1", "14M"], ["Ours+", "88.0", "86.9", "30M"]]
++c.setLineWidth(1.0); c.line(60, ytop, 480, ytop)
++c.setFont('Helvetica-Bold', 11)
++cx = [60, 200, 300, 400]
++for i, t in enumerate(rows[0]): c.drawString(cx[i], ytop - 16, t)
++c.setLineWidth(0.5); c.line(60, ytop - 24, 480, ytop - 24)
++c.setFont('Helvetica', 11)
++for r in range(1, 4):
++    for i, t in enumerate(rows[r]): c.drawString(cx[i], ytop - 24 - r * 18, t)
++c.setLineWidth(1.0); c.line(60, ytop - 24 - 3 * 18 - 8, 480, ytop - 24 - 3 * 18 - 8)
++para(c, 60, ytop - 24 - 3 * 18 - 30, ["Results favour the proposed method on every metric."])
++c.showPage(); c.save()
++
++# 3. rule-less aligned table (Chinese)
++c = canvas.Canvas(OUT + 'plain.pdf', pagesize=A4)
++y = para(c, 60, H - 80, ["下表列出了三种方案的主要参数，请注意单位。"], font='STSong-Light', size=12, lead=18)
++y -= 14
++rows = [["方案", "成本(万元)", "工期(天)", "风险"], ["甲", "120", "45", "低"],
++        ["乙", "98", "60", "中"], ["丙", "150", "30", "高"]]
++cx = [60, 170, 290, 400]
++c.setFont('STSong-Light', 12)
++for r, row in enumerate(rows):
++    for i, t in enumerate(row): c.drawString(cx[i], y - r * 20, t)
++para(c, 60, y - 4 * 20 - 20, ["综合来看，乙方案在成本与风险之间最为平衡。"], font='STSong-Light', size=12, lead=18)
++c.showPage(); c.save()
++
++# 4. vector chart (bars + curve + labels)
++c = canvas.Canvas(OUT + 'chart.pdf', pagesize=A4)
++y = para(c, 60, H - 80, LOREM)
++base = y - 200
++c.setLineWidth(1); c.line(80, base, 80, base + 150); c.line(80, base, 400, base)
++for i, v in enumerate([40, 90, 60, 120, 100]):
++    c.setFillColorRGB(0.2, 0.4 + 0.1 * i, 0.8)
++    c.rect(100 + i * 55, base, 35, v, fill=1, stroke=0)
++c.setFillColorRGB(0, 0, 0)
++c.setStrokeColorRGB(0.8, 0.1, 0.1)
++p = c.beginPath(); p.moveTo(100, base + 20)
++for i in range(1, 6): p.curveTo(100 + i * 55 - 30, base + 30 * i, 100 + i * 55 - 10, base + 20 * i + 20, 100 + i * 55, base + 25 * i + 10)
++c.drawPath(p, stroke=1, fill=0)
++c.setFont('Helvetica', 8)
++for i, t in enumerate(['Jan', 'Feb', 'Mar', 'Apr', 'May']): c.drawString(105 + i * 55, base - 12, t)
++para(c, 60, base - 40, ["Figure 2: monthly output."])
++c.showPage(); c.save()
++
++# 5. plain prose only (must be untouched) + a framed call-out box
++c = canvas.Canvas(OUT + 'prose.pdf', pagesize=A4)
++y = H - 80
++for k in range(3):
++    y = para(c, 60, y, LOREM * 2) - 10
++c.rect(60, y - 60, 400, 50, stroke=1, fill=0)
++c.setFont('Helvetica', 11); c.drawString(70, y - 30, "Note: this is a framed call-out, not a table.")
++c.showPage(); c.save()
++print('ok')
+diff --git a/apps/readest-app/src/__tests__/fixtures/data/pdfReflowFixtures.ts b/apps/readest-app/src/__tests__/fixtures/data/pdfReflowFixtures.ts
+new file mode 100644
+index 0000000..a874d32
+--- /dev/null
++++ b/apps/readest-app/src/__tests__/fixtures/data/pdfReflowFixtures.ts
+@@ -0,0 +1,14 @@
++// Generated by pdf-reflow/make_pdfs.py (reportlab). Small real PDFs used by
++// pdfReflowReal.test.ts. Inline so the patch carries no binary files.
++export const PDF_FIXTURES: Record<string, string> = {
++  ruled:
++    'JVBERi0xLjMKJZOMi54gUmVwb3J0TGFiIEdlbmVyYXRlZCBQREYgZG9jdW1lbnQgKG9wZW5zb3VyY2UpCjEgMCBvYmoKPDwKL0YxIDIgMCBSCj4+CmVuZG9iagoyIDAgb2JqCjw8Ci9CYXNlRm9udCAvSGVsdmV0aWNhIC9FbmNvZGluZyAvV2luQW5zaUVuY29kaW5nIC9OYW1lIC9GMSAvU3VidHlwZSAvVHlwZTEgL1R5cGUgL0ZvbnQKPj4KZW5kb2JqCjMgMCBvYmoKPDwKL0JpdHNQZXJDb21wb25lbnQgOCAvQ29sb3JTcGFjZSAvRGV2aWNlUkdCIC9GaWx0ZXIgWyAvQVNDSUk4NURlY29kZSAvRmxhdGVEZWNvZGUgXSAvSGVpZ2h0IDE4IC9MZW5ndGggMTIwOSAvU3VidHlwZSAvSW1hZ2UgCiAgL1R5cGUgL1hPYmplY3QgL1dpZHRoIDMwCj4+CnN0cmVhbQpHYW5yUitVZ2gqIS5gSVRQImk7VEolVmY2PDBQZ2lQImk7VGlgNHNEV0AiU1wtKEFTM2AyZWJpMitkZiknKjpcXiQlMFFiKzllR10oKm5LKlRFTWZ1J05CWlJURVZIaihDWW1lP2oqZkQnbDhJaD9qM0lkKC1JMUUrQyNtJmNjKCwoXE9gKDYtJERqYjEpSyY4XTlGcTU5QjJhUD4qbilXRTEnc2liTnVPR0NiQ0wkRlpFYEZRY0ozLyZIUFhXKFo1UHIhYj1QNSYtakhdPWIkayMiM1EtRFRGJnNHRCpUMHMiQUFoQz9rLTlAW1hdVTwjK1BePF5fPzJAI2AwZXIsZWk9ZU9jaU5SOStqZkM7M0cwXjhoKkNXZD83UFk5KldLYDBwNVxGOGlGZDdaJyYlKzktMjImJko3Y2soWkBtXiwlTyhZJlAiKVk9Yk1bUixLYmZsVTVANS9EKyNJIzZxZTE+QFpGUDhbWVEwRjdbdCc3YCJWWjBMX001VTlDWXIwLjVFMkNNLFRTJS80SERyLjpsLDpkXFEpazJQajFlO1BrLmwxOGgzJj5LVyg7O3BMVWhqW284R0tZZ1QyJD1FPSU4NEJKNSdvPSw1LXExOWUncFlMakJMU3VjJ25dc24ocmBSWSdxPTJaPU4uOEwncCU/UUxdWEtpLys8cHEiZ1Q3JUxeVEF0WD9bTl0iX0J1ImNrUFxxW1wsOGokRG1sJzBHZ2VvPkpYMEUkZE9AOWkkbkYuNyNiLiplYkQjOilIZGEpYCYxK1w8aGpGI1JeL2ZqQmtoYGE+TFYxNDIsZkw2Ujs6QkJYbGNSZTIudDA+b0AvLkY2SztgQU5OYC5sVWFGVTBSUkU/UlBVPiJIUlMpJUJbJjJDR1JSJmBETitVWUJSU0BqOlhRSiRmUlJjc2A3IzA3TUZuY3VsJWJWRztgI1ZFPmV0Ry5xTmo+R0ZCS0M2KmdYMTNSKkUuYVhRb2lsWlhsSldMKkc8RktuVDkuIUBgMC9TN2Y4RCtMYD9ea2lmUmFzKWM3alU4MydTLTFhQD1CKlUtKEtPX01hbWJUbEdwMktGYy9PYFRTKUd0LExbQDtsWEhfKU05I2RMWz0rNlhuK0ZiKWRRNzZZMHA+ZzxeYWFfZEppP2BcOD80X2UoazplbzJPRl9kaUhNQF9sNDooQXJtREptOFF0aWU6bmQ+PlBfJzZGZm9FMV5lVyc/MEUpWktrXEBTYlI8YVJbVyFlTUtsYzNaR1NcIXNaL2IxcTQ5IU5EOCspJGxuUDZCUm1BUVMnVnFlN3BSTjkpam1kclRZY0VxKSlrKy1YLWdHc0hEY0ZKI2I0P01HXFlXKkVFaWBnaklCYUhBci0qXnRyQV1aTyNWNlZvbkQudFQ4QVsiaURBIW5wTEFbPD9sQ0gzdVVqZnMxS0VUKC9JKF1NREI2PSw8XW5PN0pcPylXXFpVOmRFV1JMPVBrP00jJk9gSDVOQGspOG5BXS9WRzBgSGNIMTQ7Wm4vR11AJyYoXVdVaywlJjNScGEoNC0/SVZYSTtTSCpgYyY3JGI/aSQsSkFVNidhbz83ITldYzheIWphPVVHU3NTcC0lZ21uOiZjfj5lbmRzdHJlYW0KZW5kb2JqCjQgMCBvYmoKPDwKL0NvbnRlbnRzIDggMCBSIC9NZWRpYUJveCBbIDAgMCA1OTUuMjc1NiA4NDEuODg5OCBdIC9QYXJlbnQgNyAwIFIgL1Jlc291cmNlcyA8PAovRm9udCAxIDAgUiAvUHJvY1NldCBbIC9QREYgL1RleHQgL0ltYWdlQiAvSW1hZ2VDIC9JbWFnZUkgXSAvWE9iamVjdCA8PAovRm9ybVhvYi5lNzY0MGI3OWI0OGUwZDgzZmNiYzZlOTVmMTU0ZTA0OSAzIDAgUgo+Pgo+PiAvUm90YXRlIDAgL1RyYW5zIDw8Cgo+PiAKICAvVHlwZSAvUGFnZQo+PgplbmRvYmoKNSAwIG9iago8PAovUGFnZU1vZGUgL1VzZU5vbmUgL1BhZ2VzIDcgMCBSIC9UeXBlIC9DYXRhbG9nCj4+CmVuZG9iago2IDAgb2JqCjw8Ci9BdXRob3IgKGFub255bW91cykgL0NyZWF0aW9uRGF0ZSAoRDoyMDI2MTAwNDE0NTU0NCswOCcwMCcpIC9DcmVhdG9yIChhbm9ueW1vdXMpIC9LZXl3b3JkcyAoKSAvTW9kRGF0ZSAoRDoyMDI2MTAwNDE0NTU0NCswOCcwMCcpIC9Qcm9kdWNlciAoUmVwb3J0TGFiIFBERiBMaWJyYXJ5IC0gXChvcGVuc291cmNlXCkpIAogIC9TdWJqZWN0ICh1bnNwZWNpZmllZCkgL1RpdGxlICh1bnRpdGxlZCkgL1RyYXBwZWQgL0ZhbHNlCj4+CmVuZG9iago3IDAgb2JqCjw8Ci9Db3VudCAxIC9LaWRzIFsgNCAwIFIgXSAvVHlwZSAvUGFnZXMKPj4KZW5kb2JqCjggMCBvYmoKPDwKL0ZpbHRlciBbIC9BU0NJSTg1RGVjb2RlIC9GbGF0ZURlY29kZSBdIC9MZW5ndGggNzA1Cj4+CnN0cmVhbQpHYXNiWDlva2J0JjtLWk9NRS8scU1SRTdsTyZcLTpXbVomTm9QLmJIXUVPaFhCJWNoLmY4ckRZQ2Q4UkZAZEY/RzQ4L0hHNWcyVTlHTDZEPGNlcmUxSlUzRHBKSGZ1bGZoWms8U0JFbDRhKmxSL2BwJWMqTGQycVcyYkRGI1ozSiRSJ3VIWylgRiRdX2taY1xzJXNbRS9dYFJfYSciIigwZnRTYnJATCU+I0NFLyo6ZDU1KkRgMzU5OTYyJ1w4T3MkM1Y4OjlVUVg3PWUvYS51MS0rJG5tbTguRFhQVSNgNjtQZW4qXkcibXVwSlo4b0MzUydwS1FQOTIkQzdcUipfM1hPTk05biReJTVNTS85QmIqWDw1VkBGMihyJ0tDPEQ2QD4wKko8VihLNz9VL2dlMURARjUtJUxKbSU+WSwjYDQ6PnFMNFRocyUhTElhLEsjQF5DaTw0Q1YiXkpuTitOKz02aTwyZ3VVSkxKJlolK1JBLCNYbiQ1N3I/UiZTI0pmZiZrYzdHdSZLTiYxKGpKY0pRLGZrQXBJYDRgVV9AY2lsLDojLy9jYVQzUiRKNkohKS1TQC8pRWUmS3BxYXVOKjpia0E0R1s5NV8hP3E3PVcpX1M2U2FTITRRSTIxUzxnYzppTkNMWkhQSTM8VytYTmFYXTc0XyRtMmQ1R1xYYEteaiJBQEssV2pVTyFtMkZPL0NpaXQ5KkEvO05aVkpZRkRPY29OTmklZColO2ZyZTg/aih1JFxKXG5wbjstQixoa28hWTZJcVJdXj0iIWE6KkdxZ2JQZ1xpdEhIKkJDNnMkaGdRRTYxKT5sQFwuUSVCLEI9VVwtbTNmKmshPVRwOWAvYWkoRDNQJ1FBLEYnK0dDb1NIK0M3LGhbPz9GMkNGaWY6TEZtJ2dfX1BUPCNVIyFGdVU5RmNAOkVQUmFofj5lbmRzdHJlYW0KZW5kb2JqCnhyZWYKMCA5CjAwMDAwMDAwMDAgNjU1MzUgZiAKMDAwMDAwMDA2MSAwMDAwMCBuIAowMDAwMDAwMDkyIDAwMDAwIG4gCjAwMDAwMDAxOTkgMDAwMDAgbiAKMDAwMDAwMTU5NyAwMDAwMCBuIAowMDAwMDAxODYzIDAwMDAwIG4gCjAwMDAwMDE5MzEgMDAwMDAgbiAKMDAwMDAwMjE5MiAwMDAwMCBuIAowMDAwMDAyMjUxIDAwMDAwIG4gCnRyYWlsZXIKPDwKL0lEIApbPDg1ZDIwODBmYzYxNWQ3YTlmNzdkNWYxZGE1YWY1YzA1Pjw4NWQyMDgwZmM2MTVkN2E5Zjc3ZDVmMWRhNWFmNWMwNT5dCiUgUmVwb3J0TGFiIGdlbmVyYXRlZCBQREYgZG9jdW1lbnQgLS0gZGlnZXN0IChvcGVuc291cmNlKQoKL0luZm8gNiAwIFIKL1Jvb3QgNSAwIFIKL1NpemUgOQo+PgpzdGFydHhyZWYKMzA0NgolJUVPRgo=',
++  booktabs:
++    'JVBERi0xLjMKJZOMi54gUmVwb3J0TGFiIEdlbmVyYXRlZCBQREYgZG9jdW1lbnQgKG9wZW5zb3VyY2UpCjEgMCBvYmoKPDwKL0YxIDIgMCBSIC9GMiAzIDAgUgo+PgplbmRvYmoKMiAwIG9iago8PAovQmFzZUZvbnQgL0hlbHZldGljYSAvRW5jb2RpbmcgL1dpbkFuc2lFbmNvZGluZyAvTmFtZSAvRjEgL1N1YnR5cGUgL1R5cGUxIC9UeXBlIC9Gb250Cj4+CmVuZG9iagozIDAgb2JqCjw8Ci9CYXNlRm9udCAvSGVsdmV0aWNhLUJvbGQgL0VuY29kaW5nIC9XaW5BbnNpRW5jb2RpbmcgL05hbWUgL0YyIC9TdWJ0eXBlIC9UeXBlMSAvVHlwZSAvRm9udAo+PgplbmRvYmoKNCAwIG9iago8PAovQ29udGVudHMgOCAwIFIgL01lZGlhQm94IFsgMCAwIDU5NS4yNzU2IDg0MS44ODk4IF0gL1BhcmVudCA3IDAgUiAvUmVzb3VyY2VzIDw8Ci9Gb250IDEgMCBSIC9Qcm9jU2V0IFsgL1BERiAvVGV4dCAvSW1hZ2VCIC9JbWFnZUMgL0ltYWdlSSBdCj4+IC9Sb3RhdGUgMCAvVHJhbnMgPDwKCj4+IAogIC9UeXBlIC9QYWdlCj4+CmVuZG9iago1IDAgb2JqCjw8Ci9QYWdlTW9kZSAvVXNlTm9uZSAvUGFnZXMgNyAwIFIgL1R5cGUgL0NhdGFsb2cKPj4KZW5kb2JqCjYgMCBvYmoKPDwKL0F1dGhvciAoYW5vbnltb3VzKSAvQ3JlYXRpb25EYXRlIChEOjIwMjYxMDA0MTQ1NTQ0KzA4JzAwJykgL0NyZWF0b3IgKGFub255bW91cykgL0tleXdvcmRzICgpIC9Nb2REYXRlIChEOjIwMjYxMDA0MTQ1NTQ0KzA4JzAwJykgL1Byb2R1Y2VyIChSZXBvcnRMYWIgUERGIExpYnJhcnkgLSBcKG9wZW5zb3VyY2VcKSkgCiAgL1N1YmplY3QgKHVuc3BlY2lmaWVkKSAvVGl0bGUgKHVudGl0bGVkKSAvVHJhcHBlZCAvRmFsc2UKPj4KZW5kb2JqCjcgMCBvYmoKPDwKL0NvdW50IDEgL0tpZHMgWyA0IDAgUiBdIC9UeXBlIC9QYWdlcwo+PgplbmRvYmoKOCAwIG9iago8PAovRmlsdGVyIFsgL0FTQ0lJODVEZWNvZGUgL0ZsYXRlRGVjb2RlIF0gL0xlbmd0aCA1NjQKPj4Kc3RyZWFtCkdhc2JYZ04mYzsmO0taUCdSU04xMUZoQixqMykkXVxaLiRKUFNdRyMzW2RGW1VPdCJAcUBYZGdaM1FSJzFDVW1DQmBESCtNRicoJ0ZNJXRiRSpMMFFITztUYEMndWpHM0UvNiVZJCloOkZOZUFDNGx0ciomaEpTW1VTS0dCLHViNWM8IjZdO09RJGRlWFFfUVhjIVBdKkM/TkQhZD1OSEhcLDxYaGcscVtRYTsyZ1wwTTRxKiZcZ1sqJStXVGpPZHF1Ij1QUVI5aCJeLCxpNz1aP0hhKCI5ZWNYTV1lQyczMyokLFkzZS08I1dmPVdRZD91JWZEXWhmS1RcYDlFOFhhQ0hrVSNRVXNFXTYsNCY5TChGT1lwbCwiYEZXQSllNkU7W05FMEc+J2FuaU1pMUVxKDQnNE1IIWFvRT86Sj8yXkNVNDRJXlwuOC81P1Eoa1NtR3JdMUoxb3BrS0VzRW1bXENmZDIpQ1ZucjlEcjVDNmgvcVFaN1sqK2NZZl47OSlASkE3RUBgQFYzbCc9RElWN3RBKlVaISVDLjduMHJgb3FHZlQhOTYwMWdPSSorLW9GYW8rOCFtOyZaMlUsSzVWaTFVSjlHNTovajY1LDBzWmNCV2pKT1coUTs4V2pzakIuLCIqKTYjP1otMHFPTUBDLyNbVDRAWnJyRFRlbC5aYGRbbFEnZztoTHJkZFsnT0BXZ2JAMmwqJG05V0UmYWxvXChGOmIlbCNYNyFFYClhKnJ+PmVuZHN0cmVhbQplbmRvYmoKeHJlZgowIDkKMDAwMDAwMDAwMCA2NTUzNSBmIAowMDAwMDAwMDYxIDAwMDAwIG4gCjAwMDAwMDAxMDIgMDAwMDAgbiAKMDAwMDAwMDIwOSAwMDAwMCBuIAowMDAwMDAwMzIxIDAwMDAwIG4gCjAwMDAwMDA1MjQgMDAwMDAgbiAKMDAwMDAwMDU5MiAwMDAwMCBuIAowMDAwMDAwODUzIDAwMDAwIG4gCjAwMDAwMDA5MTIgMDAwMDAgbiAKdHJhaWxlcgo8PAovSUQgCls8OTYwNzc2ZDQzMDcxZjUwNmQ4NGNkMzE5OWQ0MDhkZmI+PDk2MDc3NmQ0MzA3MWY1MDZkODRjZDMxOTlkNDA4ZGZiPl0KJSBSZXBvcnRMYWIgZ2VuZXJhdGVkIFBERiBkb2N1bWVudCAtLSBkaWdlc3QgKG9wZW5zb3VyY2UpCgovSW5mbyA2IDAgUgovUm9vdCA1IDAgUgovU2l6ZSA5Cj4+CnN0YXJ0eHJlZgoxNTY2CiUlRU9GCg==',
++  plain:
++    'JVBERi0xLjMKJZOMi54gUmVwb3J0TGFiIEdlbmVyYXRlZCBQREYgZG9jdW1lbnQgKG9wZW5zb3VyY2UpCjEgMCBvYmoKPDwKL0YxIDIgMCBSIC9GMiAzIDAgUgo+PgplbmRvYmoKMiAwIG9iago8PAovQmFzZUZvbnQgL0hlbHZldGljYSAvRW5jb2RpbmcgL1dpbkFuc2lFbmNvZGluZyAvTmFtZSAvRjEgL1N1YnR5cGUgL1R5cGUxIC9UeXBlIC9Gb250Cj4+CmVuZG9iagozIDAgb2JqCjw8Ci9CYXNlRm9udCAvU1RTb25nLUxpZ2h0IC9EZXNjZW5kYW50Rm9udHMgWyA8PAovQmFzZUZvbnQgL1NUU29uZy1MaWdodCAvQ0lEU3lzdGVtSW5mbyA8PAovT3JkZXJpbmcgKEdCMSkgL1JlZ2lzdHJ5IChBZG9iZSkgL1N1cHBsZW1lbnQgMAo+PiAvRFcgMTAwMCAvRm9udERlc2NyaXB0b3IgPDwKL0FzY2VudCA3NTIgL0NhcEhlaWdodCA3MzcgL0Rlc2NlbnQgLTI3MSAvRmxhZ3MgNiAvRm9udEJCb3ggWyAtMjUgLTI1NCAxMDAwIDg4MCBdIC9Gb250TmFtZSAvU1RTb25nU3RkLUxpZ2h0IAogIC9JdGFsaWNBbmdsZSAwIC9MZWFkaW5nIDE0OCAvTWF4V2lkdGggMTAwMCAvTWlzc2luZ1dpZHRoIDUwMCAvU3RlbUggOTEgL1N0ZW1WIDU4IAogIC9UeXBlIC9Gb250RGVzY3JpcHRvciAvWEhlaWdodCA1NTMKPj4gL1N1YnR5cGUgL0NJREZvbnRUeXBlMCAvVHlwZSAvRm9udCAKICAvVyBbIDEgWyAyMDcgMjcwIDM0MiA0NjcgNDYyIDc5NyA3MTAgMjM5IDM3NCBdIDEwIFsgMzc0IDQyMyA2MDUgMjM4IDM3NSAyMzggMzM0IDQ2MiBdIDE4IDI2IDQ2MiAyNyAyOCAyMzggCiAgMjkgMzEgNjA1IDMyIFsgMzQ0IDc0OCA2ODQgNTYwIDY5NSA3MzkgNTYzIDUxMSA3MjkgNzkzIAogIDMxOCAzMTIgNjY2IDUyNiA4OTYgNzU4IDc3MiA1NDQgNzcyIDYyOCAKICA0NjUgNjA3IDc1MyA3MTEgOTcyIDY0NyA2MjAgNjA3IDM3NCAzMzMgCiAgMzc0IDYwNiA1MDAgMjM5IDQxNyA1MDMgNDI3IDUyOSA0MTUgMjY0IAogIDQ0NCA1MTggMjQxIDIzMCA0OTUgMjI4IDc5MyA1MjcgNTI0IF0gODEgWyA1MjQgNTA0IDMzOCAzMzYgMjc3IDUxNyA0NTAgNjUyIDQ2NiA0NTIgCiAgNDA3IDM3MCAyNTggMzcwIDYwNSBdIF0KPj4gXSAvRW5jb2RpbmcgL1VuaUdCLVVDUzItSCAvTmFtZSAvRjIgL1N1YnR5cGUgL1R5cGUwIC9UeXBlIC9Gb250Cj4+CmVuZG9iago0IDAgb2JqCjw8Ci9Db250ZW50cyA4IDAgUiAvTWVkaWFCb3ggWyAwIDAgNTk1LjI3NTYgODQxLjg4OTggXSAvUGFyZW50IDcgMCBSIC9SZXNvdXJjZXMgPDwKL0ZvbnQgMSAwIFIgL1Byb2NTZXQgWyAvUERGIC9UZXh0IC9JbWFnZUIgL0ltYWdlQyAvSW1hZ2VJIF0KPj4gL1JvdGF0ZSAwIC9UcmFucyA8PAoKPj4gCiAgL1R5cGUgL1BhZ2UKPj4KZW5kb2JqCjUgMCBvYmoKPDwKL1BhZ2VNb2RlIC9Vc2VOb25lIC9QYWdlcyA3IDAgUiAvVHlwZSAvQ2F0YWxvZwo+PgplbmRvYmoKNiAwIG9iago8PAovQXV0aG9yIChhbm9ueW1vdXMpIC9DcmVhdGlvbkRhdGUgKEQ6MjAyNjEwMDQxNDU1NDQrMDgnMDAnKSAvQ3JlYXRvciAoYW5vbnltb3VzKSAvS2V5d29yZHMgKCkgL01vZERhdGUgKEQ6MjAyNjEwMDQxNDU1NDQrMDgnMDAnKSAvUHJvZHVjZXIgKFJlcG9ydExhYiBQREYgTGlicmFyeSAtIFwob3BlbnNvdXJjZVwpKSAKICAvU3ViamVjdCAodW5zcGVjaWZpZWQpIC9UaXRsZSAodW50aXRsZWQpIC9UcmFwcGVkIC9GYWxzZQo+PgplbmRvYmoKNyAwIG9iago8PAovQ291bnQgMSAvS2lkcyBbIDQgMCBSIF0gL1R5cGUgL1BhZ2VzCj4+CmVuZG9iago4IDAgb2JqCjw8Ci9GaWx0ZXIgWyAvQVNDSUk4NURlY29kZSAvRmxhdGVEZWNvZGUgXSAvTGVuZ3RoIDQ2MAo+PgpzdHJlYW0KR2F0JHVAOCJLbCZIMD1NT2NON1poSGVSKmVTZzxoVyM5WGcpNFxSLmZkUkM2Oz1UUlpoOTJuOlVlTmBTZkNrWy1cRytFNjwkMnUwbGhzL0xfaz9ddTphKWgtVFs0KyskS3BcNm9Uam8/bTovTGw1cmpqVVpFLVk1KCttXz00OUs9RktfWm5yXElpVUlTZEI2Mko9aXBKUW5eVWtUPiF0TXBdRlpXbnE6Tig1ZE04MG1wcjhXW1VzQzQxWz4rPmRXKzxKaTw6bjhvaTY2N0A9KldoV0NpMCpiZDBxPSRWLVEmaGhiMS5HQFdQZ1cjc2dZQl9nKHBWa2JlOEgsSj5NMjFwJzpYOnQkIihfKCFuUjVCYHFRQU9zPDQlalomT3NGdDEwSVtIamonc1ZTJFJEN2FvOWBYO0tHQTNZVSRwS0xiOVlNM10oS14vRVRBVThaPFIvRCdLNG9WUGImUG1nRl82WU9uKDs7NkBCZE5cLC9VK3BYZT9OMz1AU1ZVa3VMNk5EbWNtJihtM29RTys6KDpzVj1rK2tTJy5ULzZSaWMrZCpmWmQ+a0Y4Ok10cTYzPktfOzRjW1tJPm9DMnI/JDlhcEMwXDM2Zz1+PmVuZHN0cmVhbQplbmRvYmoKeHJlZgowIDkKMDAwMDAwMDAwMCA2NTUzNSBmIAowMDAwMDAwMDYxIDAwMDAwIG4gCjAwMDAwMDAxMDIgMDAwMDAgbiAKMDAwMDAwMDIwOSAwMDAwMCBuIAowMDAwMDAxMTQyIDAwMDAwIG4gCjAwMDAwMDEzNDUgMDAwMDAgbiAKMDAwMDAwMTQxMyAwMDAwMCBuIAowMDAwMDAxNjc0IDAwMDAwIG4gCjAwMDAwMDE3MzMgMDAwMDAgbiAKdHJhaWxlcgo8PAovSUQgCls8OTUwMGZmYWEwYjM3Yzg2MjJiNmY1YWI0YjZmMjZiNmM+PDk1MDBmZmFhMGIzN2M4NjIyYjZmNWFiNGI2ZjI2YjZjPl0KJSBSZXBvcnRMYWIgZ2VuZXJhdGVkIFBERiBkb2N1bWVudCAtLSBkaWdlc3QgKG9wZW5zb3VyY2UpCgovSW5mbyA2IDAgUgovUm9vdCA1IDAgUgovU2l6ZSA5Cj4+CnN0YXJ0eHJlZgoyMjgzCiUlRU9GCg==',
++  chart:
++    'JVBERi0xLjMKJZOMi54gUmVwb3J0TGFiIEdlbmVyYXRlZCBQREYgZG9jdW1lbnQgKG9wZW5zb3VyY2UpCjEgMCBvYmoKPDwKL0YxIDIgMCBSCj4+CmVuZG9iagoyIDAgb2JqCjw8Ci9CYXNlRm9udCAvSGVsdmV0aWNhIC9FbmNvZGluZyAvV2luQW5zaUVuY29kaW5nIC9OYW1lIC9GMSAvU3VidHlwZSAvVHlwZTEgL1R5cGUgL0ZvbnQKPj4KZW5kb2JqCjMgMCBvYmoKPDwKL0NvbnRlbnRzIDcgMCBSIC9NZWRpYUJveCBbIDAgMCA1OTUuMjc1NiA4NDEuODg5OCBdIC9QYXJlbnQgNiAwIFIgL1Jlc291cmNlcyA8PAovRm9udCAxIDAgUiAvUHJvY1NldCBbIC9QREYgL1RleHQgL0ltYWdlQiAvSW1hZ2VDIC9JbWFnZUkgXQo+PiAvUm90YXRlIDAgL1RyYW5zIDw8Cgo+PiAKICAvVHlwZSAvUGFnZQo+PgplbmRvYmoKNCAwIG9iago8PAovUGFnZU1vZGUgL1VzZU5vbmUgL1BhZ2VzIDYgMCBSIC9UeXBlIC9DYXRhbG9nCj4+CmVuZG9iago1IDAgb2JqCjw8Ci9BdXRob3IgKGFub255bW91cykgL0NyZWF0aW9uRGF0ZSAoRDoyMDI2MTAwNDE0NTU0NCswOCcwMCcpIC9DcmVhdG9yIChhbm9ueW1vdXMpIC9LZXl3b3JkcyAoKSAvTW9kRGF0ZSAoRDoyMDI2MTAwNDE0NTU0NCswOCcwMCcpIC9Qcm9kdWNlciAoUmVwb3J0TGFiIFBERiBMaWJyYXJ5IC0gXChvcGVuc291cmNlXCkpIAogIC9TdWJqZWN0ICh1bnNwZWNpZmllZCkgL1RpdGxlICh1bnRpdGxlZCkgL1RyYXBwZWQgL0ZhbHNlCj4+CmVuZG9iago2IDAgb2JqCjw8Ci9Db3VudCAxIC9LaWRzIFsgMyAwIFIgXSAvVHlwZSAvUGFnZXMKPj4KZW5kb2JqCjcgMCBvYmoKPDwKL0ZpbHRlciBbIC9BU0NJSTg1RGVjb2RlIC9GbGF0ZURlY29kZSBdIC9MZW5ndGggNjEwCj4+CnN0cmVhbQpHYXNiWGNdNEpLJkI9MGFNRS8rbFRTcm49SEwiMW04bF42Jm5jQXJhXmI0OEJBIVd1ZmhfRilOZmQnSGFLSkssQFRCR2YiK1NeJztFNmZKUmB0WjhTJjxLMighIj9PUGRcJCNuRFBoT3JlY1VzYmxTcUxVKyhDNzpQJihlJil1LFlgIW9DTDxJdGJSOl1uRCU3IiMhciRDLWZOQCU+TjtScEBldUwzXlIxU1syPjNNZU1OT0c2QD1PWyJrJi9GUnRRMUI3I1VlM29eMi8zPkYwJUtGRj0/RjouY0pIQS0jLUxrJD9gISRSMzJwMDZAUz1CZS5ucT40cGJOTjw3L0Y7ak5iaFcvZERhY3Q9cGUsJj9GbSFNKGRfOWlWSTVXXVs/KGRwRDpfLiIqRXFaRF5IbkFGIixiY3UxMFQ1IiVAS0JsKGBgKHRKLCdQbi85alppRHQ2SEstPEVOcyk1SSVPL2RTI2lQMitAKnNRcGQwZVg+KG5XTztDR2tOaG5VZzs9KURbWFBBaElKLDNFdGoobzdzWSFhTzRhT15WPFFeSyVXNEBnMVRcMkwobSRTQC9XSydQQiZwOEIoOzZ1XilOXllqTTFzdTtwTDg6VmghT0dYTjlVWXBmJ2dNLCgwKU1WRHQlWyIiSikoP3NsRmNWZF4icSlFNiFrLFVJVnFbV0xlOUYrY15sakcxcFpwRVBtMmhiZzJwWE42c2JoXjA0aWQvOTBuNChTN1RvQHJMPik2Ylg5bzojVDwwMUhkP19uPFU/KF0rUSFQLD4kQDxoMjZuYGduMSdxdV5SNSo7Qn4+ZW5kc3RyZWFtCmVuZG9iagp4cmVmCjAgOAowMDAwMDAwMDAwIDY1NTM1IGYgCjAwMDAwMDAwNjEgMDAwMDAgbiAKMDAwMDAwMDA5MiAwMDAwMCBuIAowMDAwMDAwMTk5IDAwMDAwIG4gCjAwMDAwMDA0MDIgMDAwMDAgbiAKMDAwMDAwMDQ3MCAwMDAwMCBuIAowMDAwMDAwNzMxIDAwMDAwIG4gCjAwMDAwMDA3OTAgMDAwMDAgbiAKdHJhaWxlcgo8PAovSUQgCls8NTFiNzgxNjc2MTE5NTBlZDY5N2U0ZGEzY2FiNTQ3Y2Q+PDUxYjc4MTY3NjExOTUwZWQ2OTdlNGRhM2NhYjU0N2NkPl0KJSBSZXBvcnRMYWIgZ2VuZXJhdGVkIFBERiBkb2N1bWVudCAtLSBkaWdlc3QgKG9wZW5zb3VyY2UpCgovSW5mbyA1IDAgUgovUm9vdCA0IDAgUgovU2l6ZSA4Cj4+CnN0YXJ0eHJlZgoxNDkwCiUlRU9GCg==',
++  prose:
++    'JVBERi0xLjMKJZOMi54gUmVwb3J0TGFiIEdlbmVyYXRlZCBQREYgZG9jdW1lbnQgKG9wZW5zb3VyY2UpCjEgMCBvYmoKPDwKL0YxIDIgMCBSCj4+CmVuZG9iagoyIDAgb2JqCjw8Ci9CYXNlRm9udCAvSGVsdmV0aWNhIC9FbmNvZGluZyAvV2luQW5zaUVuY29kaW5nIC9OYW1lIC9GMSAvU3VidHlwZSAvVHlwZTEgL1R5cGUgL0ZvbnQKPj4KZW5kb2JqCjMgMCBvYmoKPDwKL0NvbnRlbnRzIDcgMCBSIC9NZWRpYUJveCBbIDAgMCA1OTUuMjc1NiA4NDEuODg5OCBdIC9QYXJlbnQgNiAwIFIgL1Jlc291cmNlcyA8PAovRm9udCAxIDAgUiAvUHJvY1NldCBbIC9QREYgL1RleHQgL0ltYWdlQiAvSW1hZ2VDIC9JbWFnZUkgXQo+PiAvUm90YXRlIDAgL1RyYW5zIDw8Cgo+PiAKICAvVHlwZSAvUGFnZQo+PgplbmRvYmoKNCAwIG9iago8PAovUGFnZU1vZGUgL1VzZU5vbmUgL1BhZ2VzIDYgMCBSIC9UeXBlIC9DYXRhbG9nCj4+CmVuZG9iago1IDAgb2JqCjw8Ci9BdXRob3IgKGFub255bW91cykgL0NyZWF0aW9uRGF0ZSAoRDoyMDI2MTAwNDE0NTU0NCswOCcwMCcpIC9DcmVhdG9yIChhbm9ueW1vdXMpIC9LZXl3b3JkcyAoKSAvTW9kRGF0ZSAoRDoyMDI2MTAwNDE0NTU0NCswOCcwMCcpIC9Qcm9kdWNlciAoUmVwb3J0TGFiIFBERiBMaWJyYXJ5IC0gXChvcGVuc291cmNlXCkpIAogIC9TdWJqZWN0ICh1bnNwZWNpZmllZCkgL1RpdGxlICh1bnRpdGxlZCkgL1RyYXBwZWQgL0ZhbHNlCj4+CmVuZG9iago2IDAgb2JqCjw8Ci9Db3VudCAxIC9LaWRzIFsgMyAwIFIgXSAvVHlwZSAvUGFnZXMKPj4KZW5kb2JqCjcgMCBvYmoKPDwKL0ZpbHRlciBbIC9BU0NJSTg1RGVjb2RlIC9GbGF0ZURlY29kZSBdIC9MZW5ndGggNDM0Cj4+CnN0cmVhbQpHYXVhOV8sQS9uJjtLWDtgSUNpV0BxWk1vNFpaTTtOWWg5ZyxoWSQoIkJscS1wJCY9Izo0I2c4UWY+ZTdiZWdbY15PLUhwKylHMyolWD8zO3BWYWlvYUQ4Iio4cnU4SVNtVWpFQ2xEL2JhV1xzRFRBVkc5UzQtUyhULTxaQlI1XWVBMD9aOWc3TG9qNklgSmJfPFlnIUsjMG49ImlhW209MC8sNWdWKGtzN1kqNy1DPnAzUSFeXSdvdF9ASydERCdUUjY5TzdEMDMmOWs6TDAhImYjWltSXVtkOixtWTpIWEEkOE5DKmZkU0RMZU8vdFVVJDddL1xMOEVIRW1ZaUMrPW9QZGYnYi1dV3EoJTw3RVdfTVssK2BUTkghVGZdYmFbPy1hZzcwJ09hKmhiQDI2YUFOXSFjQz1ycGNuSVk/XzsiWDhob15OTGJuUEprU3MlLVE5SyJhJlVJOyZ1YGRMYyZJVSQsLnA2Xz46U2hPQCdxU0trPFRZR1o+Im87VGJwcTRcbG1HXGJhRTpQJTVVY0FWNltnMDxDRiledCtOISUzWWlOXl9tYyc/SkBCbWZ+PmVuZHN0cmVhbQplbmRvYmoKeHJlZgowIDgKMDAwMDAwMDAwMCA2NTUzNSBmIAowMDAwMDAwMDYxIDAwMDAwIG4gCjAwMDAwMDAwOTIgMDAwMDAgbiAKMDAwMDAwMDE5OSAwMDAwMCBuIAowMDAwMDAwNDAyIDAwMDAwIG4gCjAwMDAwMDA0NzAgMDAwMDAgbiAKMDAwMDAwMDczMSAwMDAwMCBuIAowMDAwMDAwNzkwIDAwMDAwIG4gCnRyYWlsZXIKPDwKL0lEIApbPDVjMmU3NjVmYzEzODQ3ZTczM2MxNDY2ZjAwMjQwMjI5Pjw1YzJlNzY1ZmMxMzg0N2U3MzNjMTQ2NmYwMDI0MDIyOT5dCiUgUmVwb3J0TGFiIGdlbmVyYXRlZCBQREYgZG9jdW1lbnQgLS0gZGlnZXN0IChvcGVuc291cmNlKQoKL0luZm8gNSAwIFIKL1Jvb3QgNCAwIFIKL1NpemUgOAo+PgpzdGFydHhyZWYKMTMxNAolJUVPRgo=',
++};
 diff --git a/apps/readest-app/src/__tests__/foliate-pdf-reflow.test.ts b/apps/readest-app/src/__tests__/foliate-pdf-reflow.test.ts
 new file mode 100644
-index 0000000..52535d5
+index 0000000..cf6abc4
 --- /dev/null
 +++ b/apps/readest-app/src/__tests__/foliate-pdf-reflow.test.ts
-@@ -0,0 +1,77 @@
+@@ -0,0 +1,125 @@
 +import { describe, expect, it, vi } from 'vitest';
 +
 +const mocks = vi.hoisted(() => ({
@@ -3259,6 +3535,7 @@ index 0000000..52535d5
 +  ],
 +  destroy: vi.fn(),
 +  render: vi.fn(),
++  rotate: 0,
 +}));
 +vi.mock('@pdfjs/pdf.min.mjs', () => {
 +  class PDFDataRangeTransport {
@@ -3267,14 +3544,21 @@ index 0000000..52535d5
 +  (globalThis as unknown as { pdfjsLib: unknown }).pdfjsLib = {
 +    GlobalWorkerOptions: {},
 +    PDFDataRangeTransport,
++    OPS: { save: 10, restore: 11 },
 +    getDocument: () => ({
 +      destroy: mocks.destroy,
 +      promise: Promise.resolve({
 +        numPages: 1,
 +        getPage: async () => ({
 +          view: [20, 30, 620, 830],
-+          rotate: 0,
++          get rotate() {
++            return mocks.rotate;
++          },
 +          getViewport: () => ({ width: 600, height: 800 }),
++          getOperatorList: async () => ({
++            fnArray: new Uint8Array([10, 11]),
++            argsArray: [null, null],
++          }),
 +          getTextContent: async () => ({ items: mocks.items }),
 +          render: mocks.render,
 +          cleanup: vi.fn(),
@@ -3318,6 +3602,46 @@ index 0000000..52535d5
 +    expect(JSON.stringify(mocks.items)).toBe(before);
 +    book.destroy();
 +    expect(mocks.destroy).toHaveBeenCalledOnce();
++  });
++
++  it('exposes read-only operator geometry and the real OPS table without rendering', async () => {
++    const { makePDF } = await import('foliate-js/pdf.js');
++    const book = (await makePDF({
++      size: 1,
++      slice: () => ({ arrayBuffer: async () => new ArrayBuffer(0) }),
++    })) as unknown as {
++      sections: { getReflowGraphics: () => Promise<Record<string, unknown>> }[];
++    };
++    mocks.render.mockClear();
++    const graphics = await book.sections[0]!.getReflowGraphics();
++    expect(graphics['ops']).toEqual({ save: 10, restore: 11 });
++    expect(graphics['origin']).toEqual([20, 30]);
++    expect(graphics['width']).toBe(600);
++    expect(Array.from(graphics['fnArray'] as ArrayLike<number>)).toEqual([10, 11]);
++    expect(mocks.render).not.toHaveBeenCalled();
++  });
++
++  it('refuses to render a figure region on rotated pages', async () => {
++    const { makePDF } = await import('foliate-js/pdf.js');
++    const book = (await makePDF({
++      size: 1,
++      slice: () => ({ arrayBuffer: async () => new ArrayBuffer(0) }),
++    })) as unknown as {
++      sections: {
++        renderReflowRegion: (r: object, w?: number) => Promise<string | null>;
++      }[];
++    };
++    mocks.rotate = 90;
++    try {
++      expect(
++        await book.sections[0]!.renderReflowRegion({ x0: 0, y0: 0, x1: 10, y1: 10 }),
++      ).toBeNull();
++      expect(
++        await book.sections[0]!.renderReflowRegion({ x0: 5, y0: 5, x1: 5, y1: 20 }),
++      ).toBeNull();
++    } finally {
++      mocks.rotate = 0;
++    }
 +  });
 +});
 diff --git a/apps/readest-app/src/__tests__/helpers/settings.test.ts b/apps/readest-app/src/__tests__/helpers/settings.test.ts
@@ -4039,6 +4363,314 @@ index 0000000..7f1c06a
 +    });
 +  });
 +});
+diff --git a/apps/readest-app/src/__tests__/utils/pdfReflowLayout.test.ts b/apps/readest-app/src/__tests__/utils/pdfReflowLayout.test.ts
+new file mode 100644
+index 0000000..313d1dc
+--- /dev/null
++++ b/apps/readest-app/src/__tests__/utils/pdfReflowLayout.test.ts
+@@ -0,0 +1,168 @@
++import { describe, expect, it } from 'vitest';
++import { extractPdfGraphics, type PdfGraphics } from '@/utils/pdfReflowGraphics';
++import { reflowPdfText, type PdfTextItem } from '@/utils/pdfReflow';
++import { groupReflowBlocks } from '@/utils/pdfReflowGroups';
++
++const item = (str: string, x: number, y: number, size = 12): PdfTextItem => ({
++  str,
++  transform: [size, 0, 0, size, x, y],
++  width: str.length * size * 0.5,
++  height: size,
++});
++const empty: PdfGraphics = { images: [], segments: [], shapes: [], fills: [] };
++const hline = (y: number, x0: number, x1: number) => ({ x0, y0: y, x1, y1: y });
++const vline = (x: number, y0: number, y1: number) => ({ x0: x, y0, x1: x, y1 });
++const run = (items: PdfTextItem[], graphics: Partial<PdfGraphics> = {}) =>
++  reflowPdfText(items, 600, 800, true, { ...empty, ...graphics });
++
++describe('extractPdfGraphics', () => {
++  const OPS = {
++    save: 10,
++    restore: 11,
++    transform: 12,
++    constructPath: 91,
++    stroke: 20,
++    fill: 22,
++    paintImageXObject: 85,
++    paintFormXObjectBegin: 74,
++    paintFormXObjectEnd: 75,
++  };
++  it('applies nested transforms to image placements and subtracts the view origin', () => {
++    const list = {
++      fnArray: [OPS.save, OPS.transform, OPS.paintImageXObject, OPS.restore],
++      argsArray: [null, [200, 0, 0, 100, 50, 300], ['img'], null],
++    };
++    const result = extractPdfGraphics(list, OPS, [10, 20], 600, 800);
++    expect(result.images).toEqual([{ x0: 40, y0: 280, x1: 240, y1: 380 }]);
++  });
++  it('turns stroked axis-aligned paths into rules and curved paths into shapes', () => {
++    const path = new Float32Array([
++      0, 100, 100, 1, 300, 100, 0, 100, 200, 2, 120, 260, 150, 260, 200, 200,
++    ]);
++    const list = {
++      fnArray: [OPS.constructPath],
++      argsArray: [[OPS.stroke, [path], null]],
++    };
++    const result = extractPdfGraphics(list, OPS, [0, 0], 600, 800);
++    expect(result.segments).toEqual([{ x0: 100, y0: 100, x1: 300, y1: 100 }]);
++    expect(result.shapes).toHaveLength(1);
++  });
++  it('never throws on malformed lists', () => {
++    const result = extractPdfGraphics(
++      { fnArray: [OPS.constructPath, OPS.transform], argsArray: [null, [NaN]] },
++      OPS,
++      [0, 0],
++      600,
++      800,
++    );
++    expect(result).toEqual(empty);
++  });
++});
++
++describe('table recognition', () => {
++  const grid = (): Partial<PdfGraphics> => {
++    const ys = [700, 676, 652];
++    const xs = [60, 200, 300];
++    return {
++      segments: [...ys.map((y) => hline(y, 60, 300)), ...xs.map((x) => vline(x, 652, 700))],
++    };
++  };
++  it('builds a ruled table with header, rows and columns', () => {
++    const page = run(
++      [item('Name', 66, 683), item('Qty', 206, 683), item('Apple', 66, 659), item('12', 206, 659)],
++      grid(),
++    );
++    const cells = page.blocks.filter((b) => b.kind === 'cell');
++    expect(cells.map((c) => c.text)).toEqual(['Name', 'Qty', 'Apple', '12']);
++    expect(cells[0]!.table).toMatchObject({ header: true, rows: 2, cols: 2, row: 0, col: 0 });
++    expect(cells[3]!.table!.numeric).toBe(true);
++    expect(page.sourceMap).toHaveLength(page.blocks.length);
++  });
++  it('keeps source offsets of cell text for speech and selection mapping', () => {
++    const page = run(
++      [item('Name', 66, 683), item('Qty', 206, 683), item('Apple', 66, 659), item('12', 206, 659)],
++      grid(),
++    );
++    expect(page.sourceText).toBe('NameQtyApple12');
++    expect(page.sourceMap![0]).toEqual([0, 1, 2, 3]);
++    expect(page.sourceMap![3]).toEqual([12, 13]);
++  });
++  it('does not treat a single framed box as a table', () => {
++    const page = run([item('Careful: read this', 70, 683)], {
++      segments: [
++        hline(700, 60, 300),
++        hline(670, 60, 300),
++        vline(60, 670, 700),
++        vline(300, 670, 700),
++      ],
++    });
++    expect(page.blocks.every((b) => b.kind === 'paragraph')).toBe(true);
++  });
++  it('groups cells by table and row for rendering without losing indices', () => {
++    const page = run(
++      [
++        item('Intro paragraph text here', 60, 760),
++        item('Name', 66, 683),
++        item('Qty', 206, 683),
++        item('Apple', 66, 659),
++        item('12', 206, 659),
++      ],
++      grid(),
++    );
++    const groups = groupReflowBlocks(page.blocks);
++    expect(groups[0]!.type).toBe('block');
++    const table = groups.find((g) => g.type === 'table');
++    expect(table && table.type === 'table' && table.rows.map((r) => r.cells.length)).toEqual([
++      2, 2,
++    ]);
++    if (table?.type === 'table')
++      expect(table.rows.flatMap((r) => r.cells.map((c) => c.index))).toEqual([1, 2, 3, 4]);
++  });
++  it('recognises a rule-less aligned table but leaves a two-column prose line alone', () => {
++    const table = run([
++      item('Item', 60, 700),
++      item('Cost', 200, 700),
++      item('Days', 320, 700),
++      item('A', 60, 682),
++      item('120', 200, 682),
++      item('45', 320, 682),
++      item('B', 60, 664),
++      item('98', 200, 664),
++      item('60', 320, 664),
++    ]);
++    expect(table.blocks.filter((b) => b.kind === 'cell')).toHaveLength(9);
++    const prose = run([
++      item('This is an ordinary sentence that wraps over', 60, 700),
++      item('two lines of running text in the body copy.', 60, 684),
++    ]);
++    expect(prose.blocks.map((b) => b.kind)).toEqual(['paragraph']);
++  });
++});
++
++describe('figure recognition', () => {
++  it('emits a figure block for a bitmap in reading order and keeps captions as text', () => {
++    const page = run(
++      [item('Before the picture, a sentence.', 60, 760), item('Figure 1: caption', 60, 420)],
++      { images: [{ x0: 100, y0: 450, x1: 400, y1: 700 }] },
++    );
++    expect(page.blocks.map((b) => b.kind)).toEqual(['paragraph', 'figure', 'paragraph']);
++    // A 2pt safety margin avoids clipping anti-aliased edges.
++    expect(page.blocks[1]!.figure).toEqual({ x0: 98, y0: 448, x1: 402, y1: 702 });
++    expect(page.pageWidth).toBe(600);
++  });
++  it('ignores tiny decorations and full-page backgrounds', () => {
++    const page = run([item('Body text', 60, 700)], {
++      images: [
++        { x0: 0, y0: 0, x1: 600, y1: 800 },
++        { x0: 300, y0: 300, x1: 310, y1: 308 },
++      ],
++    });
++    expect(page.blocks.map((b) => b.kind)).toEqual(['paragraph']);
++  });
++  it('does not turn an inline glyph image into a figure', () => {
++    const page = run([item('Inline icon here', 60, 700)], {
++      images: [{ x0: 120, y0: 698, x1: 132, y1: 710 }],
++    });
++    expect(page.blocks.map((b) => b.kind)).toEqual(['paragraph']);
++  });
++});
+diff --git a/apps/readest-app/src/__tests__/utils/pdfReflowReal.test.ts b/apps/readest-app/src/__tests__/utils/pdfReflowReal.test.ts
+new file mode 100644
+index 0000000..9d011c1
+--- /dev/null
++++ b/apps/readest-app/src/__tests__/utils/pdfReflowReal.test.ts
+@@ -0,0 +1,128 @@
++// @vitest-environment node
++import { describe, expect, it } from 'vitest';
++import path from 'node:path';
++import { extractPdfGraphics } from '@/utils/pdfReflowGraphics';
++import { PDF_FIXTURES } from '../fixtures/data/pdfReflowFixtures';
++import { reflowPdfText, type PdfTextItem, type ReflowPage } from '@/utils/pdfReflow';
++
++// Real pdf.js parsing of small generated PDFs (same library the app ships);
++// fixtures/data/pdf-reflow/make_pdfs.py regenerates them with reportlab.
++const root = path.resolve(__dirname, '../../../../../packages/foliate-js/node_modules/pdfjs-dist');
++
++interface PdfJs {
++  OPS: Record<string, number>;
++  getDocument: (options: Record<string, unknown>) => {
++    promise: Promise<{
++      getPage: (n: number) => Promise<{
++        view: number[];
++        getTextContent: () => Promise<{ items: Array<Record<string, unknown>> }>;
++        getOperatorList: () => Promise<{
++          fnArray: ArrayLike<number>;
++          argsArray: ArrayLike<unknown>;
++        }>;
++      }>;
++    }>;
++  };
++}
++
++async function reflow(name: string): Promise<ReflowPage> {
++  const pdfjs = (await import(
++    '../../../../../packages/foliate-js/node_modules/pdfjs-dist/legacy/build/pdf.mjs'
++  )) as unknown as PdfJs;
++  const doc = await pdfjs.getDocument({
++    data: new Uint8Array(Buffer.from(PDF_FIXTURES[name]!, 'base64')),
++    useSystemFonts: true,
++    disableFontFace: true,
++    cMapUrl: `${root}/cmaps/`,
++    cMapPacked: true,
++    standardFontDataUrl: `${root}/standard_fonts/`,
++  }).promise;
++  const page = await doc.getPage(1);
++  const [x1, y1, x2, y2] = page.view as [number, number, number, number];
++  const content = await page.getTextContent();
++  const items: PdfTextItem[] = [];
++  for (const item of content.items) {
++    if (typeof item['str'] !== 'string') continue;
++    const t = item['transform'] as number[];
++    items.push({
++      str: item['str'],
++      width: item['width'] as number,
++      height: item['height'] as number,
++      transform: [...t.slice(0, 4), t[4]! - x1, t[5]! - y1],
++      hasEOL: item['hasEOL'] as boolean,
++      dir: item['dir'] as string,
++    });
++  }
++  const list = await page.getOperatorList();
++  const graphics = extractPdfGraphics(list, pdfjs.OPS, [x1, y1], x2 - x1, y2 - y1);
++  return reflowPdfText(items, x2 - x1, y2 - y1, true, graphics);
++}
++
++const cellText = (page: ReflowPage) =>
++  page.blocks
++    .filter((b) => b.kind === 'cell')
++    .map((b) => `${b.table!.row},${b.table!.col}=${b.text}`);
++
++describe('reflow with real pdf.js operator lists', () => {
++  it('rebuilds a ruled grid table in reading order between paragraphs', async () => {
++    const page = await reflow('ruled');
++    const kinds = page.blocks.map((b) => b.kind);
++    expect(kinds[0]).toBe('paragraph');
++    expect(kinds.filter((k) => k === 'cell')).toHaveLength(16);
++    expect(cellText(page).slice(0, 5)).toEqual([
++      '0,0=Region',
++      '0,1=Q1',
++      '0,2=Q2',
++      '0,3=Q3',
++      '1,0=North',
++    ]);
++    const first = page.blocks.find((b) => b.kind === 'cell')!;
++    expect(first.table).toMatchObject({ header: true, rows: 4, cols: 4 });
++    expect(page.blocks.find((b) => b.text === '1,200')!.table!.numeric).toBe(true);
++    // paragraph after the table and the figure after that, in order
++    const order = kinds.join(',');
++    expect(order.indexOf('cell')).toBeGreaterThan(order.indexOf('paragraph'));
++    expect(kinds.lastIndexOf('figure')).toBeGreaterThan(kinds.lastIndexOf('cell'));
++    expect(page.blocks.some((b) => b.text.startsWith('Table 1 shows'))).toBe(true);
++    // The caption under the image stays as text.
++    expect(page.blocks.some((b) => b.text.startsWith('Figure 1'))).toBe(true);
++  });
++
++  it('keeps bitmap placement as a figure with sane geometry', async () => {
++    const page = await reflow('ruled');
++    const figure = page.blocks.find((b) => b.kind === 'figure')!;
++    expect(figure.figure!.x1 - figure.figure!.x0).toBeCloseTo(300, -1);
++    expect(figure.figure!.y1 - figure.figure!.y0).toBeCloseTo(180, -1);
++    expect(page.pageWidth).toBeGreaterThan(500);
++  });
++
++  it('recognises a three-rule (booktabs) table with a header', async () => {
++    const page = await reflow('booktabs');
++    expect(cellText(page)).toContain('0,0=Method');
++    expect(cellText(page)).toContain('2,2=85.1');
++    expect(page.blocks.find((b) => b.text === 'Method')!.table!.header).toBe(true);
++    expect(page.blocks.some((b) => b.text.startsWith('Results favour'))).toBe(true);
++  });
++
++  it('recognises a rule-less aligned CJK table', async () => {
++    const page = await reflow('plain');
++    expect(cellText(page)).toContain('0,1=成本(万元)');
++    expect(cellText(page)).toContain('3,3=高');
++    expect(page.blocks.filter((b) => b.kind === 'paragraph')).toHaveLength(2);
++  });
++
++  it('turns a vector chart into a figure and drops its axis labels from the flow', async () => {
++    const page = await reflow('chart');
++    const figures = page.blocks.filter((b) => b.kind === 'figure');
++    expect(figures).toHaveLength(1);
++    const text = page.blocks.map((b) => b.text).join(' ');
++    expect(text).not.toContain('Jan');
++    expect(text).toContain('Figure 2');
++  });
++
++  it('leaves plain prose and a framed call-out untouched', async () => {
++    const page = await reflow('prose');
++    expect(page.blocks.every((b) => b.kind === 'paragraph')).toBe(true);
++    expect(page.blocks.some((b) => b.text.includes('framed call-out'))).toBe(true);
++  });
++});
 diff --git a/apps/readest-app/src/__tests__/utils/pdfReflowSelection.test.ts b/apps/readest-app/src/__tests__/utils/pdfReflowSelection.test.ts
 new file mode 100644
 index 0000000..9227021
@@ -4637,10 +5269,10 @@ index 58f1135..e44cada 100644
                <SyncInfoDialog
 diff --git a/apps/readest-app/src/app/reader/components/PdfReflowDialog.tsx b/apps/readest-app/src/app/reader/components/PdfReflowDialog.tsx
 new file mode 100644
-index 0000000..ccf8d74
+index 0000000..a1b0465
 --- /dev/null
 +++ b/apps/readest-app/src/app/reader/components/PdfReflowDialog.tsx
-@@ -0,0 +1,676 @@
+@@ -0,0 +1,739 @@
 +import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 +import { useTTSPlayerHostStore } from '@/store/ttsPlayerHostStore';
 +import { useThemeStore } from '@/store/themeStore';
@@ -4656,7 +5288,10 @@ index 0000000..ccf8d74
 +import { useBookDataStore } from '@/store/bookDataStore';
 +import { useReaderStore } from '@/store/readerStore';
 +import { useTranslation } from '@/hooks/useTranslation';
-+import { reflowPdfText, type ReflowPage } from '@/utils/pdfReflow';
++import { reflowPdfText, type ReflowBlock, type ReflowPage } from '@/utils/pdfReflow';
++import { extractPdfGraphics, type PdfGraphics } from '@/utils/pdfReflowGraphics';
++import { groupReflowBlocks } from '@/utils/pdfReflowGroups';
++import PdfReflowFigure from './PdfReflowFigure';
 +import '@/styles/pdf-reflow.css';
 +import { readReflowSession, writeReflowSession } from '@/utils/pdfReflowSession';
 +import { getPdfRendererPage, isPdfPageVisible } from '@/utils/pdfRendererPage';
@@ -4751,11 +5386,21 @@ index 0000000..ccf8d74
 +          const section = bookDoc?.sections[page];
 +          if (!section?.getReflowText) throw new Error('PDF text unavailable');
 +          const data = await section.getReflowText();
-+          // Coordinate reconstruction here only supports upright single columns.
++          // Graphics are optional evidence: any failure degrades to text-only.
++          let graphics: PdfGraphics | undefined;
++          if (data.rotation % 360 === 0 && section.getReflowGraphics) {
++            try {
++              const raw = await section.getReflowGraphics();
++              graphics = extractPdfGraphics(raw, raw.ops, raw.origin, data.width, data.height);
++            } catch {
++              graphics = undefined;
++            }
++          }
++          // Coordinate reconstruction here only supports upright pages.
 +          parsed =
 +            data.rotation % 360 !== 0
 +              ? { blocks: [], removedPageNumbers: [], warnings: ['rotated-page'] }
-+              : reflowPdfText(data.items, data.width, data.height, true);
++              : reflowPdfText(data.items, data.width, data.height, true, graphics);
 +          if (!current) return;
 +          cacheRef.current.set(page, parsed);
 +          while (cacheRef.current.size > 12) {
@@ -5083,6 +5728,75 @@ index 0000000..ccf8d74
 +    });
 +  }, [config?.booknotes, result, view, page, relocationEpoch]);
 +
++  const renderBlockParts = (block: ReflowBlock, i: number) => {
++    const spoken = tts.highlights.filter((h) => h.block === i);
++    const notes = annotations.filter((h) => h.block === i);
++    const points = [
++      ...new Set([
++        0,
++        block.text.length,
++        ...spoken.flatMap((h) => [h.start, h.end]),
++        ...notes.flatMap((h) => [h.start, h.end]),
++      ]),
++    ].sort((a, b) => a - b);
++    const parts = points.slice(0, -1).map((start, j) => {
++      const end = points[j + 1]!;
++      const speech = spoken.some((h) => start >= h.start && end <= h.end);
++      const annotation = notes.find((h) => start >= h.start && end <= h.end)?.note;
++      const text = block.text.slice(start, end);
++      if (annotation)
++        return (
++          <mark
++            key={start}
++            data-reflow-tts={speech || undefined}
++            data-reflow-annotation={annotation.cfi}
++            style={{
++              background: speech
++                ? undefined
++                : annotation.style === 'highlight'
++                  ? (getHighlightColorHex(settings, annotation.color) ?? '#f8d878')
++                  : 'transparent',
++              textDecoration: annotation.style !== 'highlight' ? 'underline' : undefined,
++              textDecorationStyle: annotation.style === 'squiggly' ? 'wavy' : undefined,
++            }}
++            onClick={(event) => {
++              event.stopPropagation();
++              const range = document.createRange();
++              range.selectNodeContents(event.currentTarget);
++              void eventDispatcher.dispatch('footnote-selection', {
++                key: bookKey,
++                index: page,
++                range,
++                cfi: annotation.cfi,
++                annotated: true,
++                reflow: true,
++                originalRange: (() => {
++                  try {
++                    const doc = view?.renderer
++                      .getContents()
++                      .find((item) => item.index === page)?.doc;
++                    return doc ? view?.resolveCFI(annotation.cfi).anchor(doc) : undefined;
++                  } catch {
++                    return undefined;
++                  }
++                })(),
++              });
++            }}
++          >
++            {text}
++          </mark>
++        );
++      return speech ? (
++        <mark data-reflow-tts key={start}>
++          {text}
++        </mark>
++      ) : (
++        text
++      );
++    });
++    return parts;
++  };
++
 +  const goPage = (next: number) => {
 +    void navigate(next);
 +  };
@@ -5214,82 +5928,63 @@ index 0000000..ccf8d74
 +                {_('No usable text on this page. View the original page; OCR is not included.')}
 +              </p>
 +            )}
-+            {result.blocks.map((block, i) => {
-+              const spoken = tts.highlights.filter((h) => h.block === i);
-+              const notes = annotations.filter((h) => h.block === i);
-+              const points = [
-+                ...new Set([
-+                  0,
-+                  block.text.length,
-+                  ...spoken.flatMap((h) => [h.start, h.end]),
-+                  ...notes.flatMap((h) => [h.start, h.end]),
-+                ]),
-+              ].sort((a, b) => a - b);
-+              const parts = points.slice(0, -1).map((start, j) => {
-+                const end = points[j + 1]!;
-+                const speech = spoken.some((h) => start >= h.start && end <= h.end);
-+                const annotation = notes.find((h) => start >= h.start && end <= h.end)?.note;
-+                const text = block.text.slice(start, end);
-+                if (annotation)
-+                  return (
-+                    <mark
-+                      key={start}
-+                      data-reflow-tts={speech || undefined}
-+                      data-reflow-annotation={annotation.cfi}
-+                      style={{
-+                        background: speech
-+                          ? undefined
-+                          : annotation.style === 'highlight'
-+                            ? (getHighlightColorHex(settings, annotation.color) ?? '#f8d878')
-+                            : 'transparent',
-+                        textDecoration: annotation.style !== 'highlight' ? 'underline' : undefined,
-+                        textDecorationStyle: annotation.style === 'squiggly' ? 'wavy' : undefined,
-+                      }}
-+                      onClick={(event) => {
-+                        event.stopPropagation();
-+                        const range = document.createRange();
-+                        range.selectNodeContents(event.currentTarget);
-+                        void eventDispatcher.dispatch('footnote-selection', {
-+                          key: bookKey,
-+                          index: page,
-+                          range,
-+                          cfi: annotation.cfi,
-+                          annotated: true,
-+                          reflow: true,
-+                          originalRange: (() => {
-+                            try {
-+                              const doc = view?.renderer
-+                                .getContents()
-+                                .find((item) => item.index === page)?.doc;
-+                              return doc ? view?.resolveCFI(annotation.cfi).anchor(doc) : undefined;
-+                            } catch {
-+                              return undefined;
-+                            }
-+                          })(),
-+                        });
-+                      }}
-+                    >
-+                      {text}
-+                    </mark>
-+                  );
-+                return speech ? (
-+                  <mark data-reflow-tts key={start}>
-+                    {text}
-+                  </mark>
-+                ) : (
-+                  text
-+                );
-+              });
-+              return block.kind === 'note' ? (
-+                <aside data-reflow-block={i} className='pdf-reflow-note' key={i}>
-+                  {parts}
++            {groupReflowBlocks(result.blocks).map((group) =>
++              group.type === 'table' ? (
++                <div className='pdf-reflow-table-wrap' key={`table-${group.id}`} tabIndex={0}>
++                  <table className='pdf-reflow-table'>
++                    <tbody>
++                      {group.rows.map((row) => (
++                        <tr key={row.row}>
++                          {row.cells.map(({ block, index }) => {
++                            const Tag = block.table!.header ? 'th' : 'td';
++                            return (
++                              <Tag
++                                key={index}
++                                data-reflow-block={index}
++                                data-numeric={block.table!.numeric || undefined}
++                                scope={block.table!.header ? 'col' : undefined}
++                                rowSpan={
++                                  block.table!.rowSpan > 1 ? block.table!.rowSpan : undefined
++                                }
++                                colSpan={
++                                  block.table!.colSpan > 1 ? block.table!.colSpan : undefined
++                                }
++                              >
++                                {renderBlockParts(block, index)}
++                              </Tag>
++                            );
++                          })}
++                        </tr>
++                      ))}
++                    </tbody>
++                  </table>
++                </div>
++              ) : group.block.kind === 'figure' ? (
++                <PdfReflowFigure
++                  key={`figure-${group.index}`}
++                  index={group.index}
++                  block={group.block}
++                  page={page}
++                  pageWidth={result.pageWidth}
++                  pageHeight={result.pageHeight}
++                  render={bookDoc?.sections[page]?.renderReflowRegion}
++                  label={_('Figure')}
++                  failedLabel={_('Figure could not be shown. Compare with the original page.')}
++                />
++              ) : group.block.kind === 'note' ? (
++                <aside
++                  data-reflow-block={group.index}
++                  className='pdf-reflow-note'
++                  key={group.index}
++                >
++                  {renderBlockParts(group.block, group.index)}
 +                </aside>
 +              ) : (
-+                <p data-reflow-block={i} key={i}>
-+                  {parts}
++                <p data-reflow-block={group.index} key={group.index}>
++                  {renderBlockParts(group.block, group.index)}
 +                </p>
-+              );
-+            })}
++              ),
++            )}
 +          </>
 +        )}
 +        <nav className='pdf-reflow-end-navigation' aria-label={_('Page Navigation')}>
@@ -5317,6 +6012,116 @@ index 0000000..ccf8d74
 +};
 +
 +export default PdfReflowDialog;
+diff --git a/apps/readest-app/src/app/reader/components/PdfReflowFigure.tsx b/apps/readest-app/src/app/reader/components/PdfReflowFigure.tsx
+new file mode 100644
+index 0000000..1131038
+--- /dev/null
++++ b/apps/readest-app/src/app/reader/components/PdfReflowFigure.tsx
+@@ -0,0 +1,104 @@
++import { useEffect, useRef, useState } from 'react';
++import type { ReflowBlock } from '@/utils/pdfReflow';
++
++interface Props {
++  index: number;
++  block: ReflowBlock;
++  page: number;
++  pageWidth?: number;
++  pageHeight?: number;
++  render?: (
++    rect: { x0: number; y0: number; x1: number; y1: number },
++    maxWidth?: number,
++  ) => Promise<string | null>;
++  label: string;
++  failedLabel: string;
++}
++
++/** A picture region of the PDF page, rendered lazily and only when it nears
++ * the viewport. The bitmap is a derived view of the page: it carries no text
++ * and never takes part in speech, selection or annotation mapping. */
++const PdfReflowFigure = ({
++  index,
++  block,
++  page,
++  pageWidth,
++  pageHeight,
++  render,
++  label,
++  failedLabel,
++}: Props) => {
++  const ref = useRef<HTMLElement>(null);
++  const [src, setSrc] = useState<string | null>(null);
++  const [failed, setFailed] = useState(false);
++  const [near, setNear] = useState(false);
++  const rect = block.figure;
++
++  useEffect(() => {
++    const element = ref.current;
++    if (!element) return;
++    if (typeof IntersectionObserver === 'undefined') {
++      setNear(true);
++      return;
++    }
++    const observer = new IntersectionObserver(
++      (entries) => entries.some((entry) => entry.isIntersecting) && setNear(true),
++      { rootMargin: '600px 0px' },
++    );
++    observer.observe(element);
++    return () => observer.disconnect();
++  }, []);
++
++  useEffect(() => {
++    if (!near || !rect || !render) return;
++    let current = true;
++    let url: string | null = null;
++    setFailed(false);
++    render(rect, 1100)
++      .then((value) => {
++        if (!current) {
++          if (value) URL.revokeObjectURL(value);
++          return;
++        }
++        url = value;
++        if (value) setSrc(value);
++        else setFailed(true);
++      })
++      .catch(() => current && setFailed(true));
++    return () => {
++      current = false;
++      if (url) URL.revokeObjectURL(url);
++    };
++  }, [near, rect, render, page]);
++
++  if (!rect) return null;
++  const ratio = (rect.y1 - rect.y0) / Math.max(1, rect.x1 - rect.x0);
++  const widthShare = pageWidth ? Math.min(1, (rect.x1 - rect.x0) / pageWidth) : 1;
++  return (
++    <figure
++      ref={ref}
++      className='pdf-reflow-figure'
++      data-reflow-figure={index}
++      style={{ width: `${Math.max(30, Math.round(widthShare * 100))}%`, maxWidth: '100%' }}
++    >
++      {src ? (
++        <img src={src} alt={`${label} ${index + 1}`} draggable={false} decoding='async' />
++      ) : failed ? (
++        <div className='pdf-reflow-figure-failed' role='note'>
++          {failedLabel}
++        </div>
++      ) : (
++        <div
++          className='pdf-reflow-figure-skeleton'
++          aria-hidden='true'
++          style={{
++            aspectRatio: `${1 / Math.max(0.05, Math.min(ratio, 3))}`,
++            minHeight: pageHeight ? undefined : 80,
++          }}
++        />
++      )}
++    </figure>
++  );
++};
++
++export default PdfReflowFigure;
 diff --git a/apps/readest-app/src/app/reader/components/ReaderContent.tsx b/apps/readest-app/src/app/reader/components/ReaderContent.tsx
 index 8aec552..99653f1 100644
 --- a/apps/readest-app/src/app/reader/components/ReaderContent.tsx
@@ -8082,10 +8887,10 @@ index e7e30f8..5a4fbc6 100644
        const config = getConfig(bookKey);
        if (viewState?.isPrimary && config) {
 diff --git a/apps/readest-app/src/libs/document.ts b/apps/readest-app/src/libs/document.ts
-index 96f5ed9..985e83b 100644
+index 96f5ed9..9c52bf0 100644
 --- a/apps/readest-app/src/libs/document.ts
 +++ b/apps/readest-app/src/libs/document.ts
-@@ -50,6 +50,13 @@ export interface SectionItem {
+@@ -50,6 +50,28 @@ export interface SectionItem {
    // Resolve a reference a script introduces after load (see observeDynamicResources).
    loadHref?: (href: string) => Promise<string>;
    createDocument: () => Promise<Document>;
@@ -8096,6 +8901,21 @@ index 96f5ed9..985e83b 100644
 +    height: number;
 +    rotation: number;
 +  }>;
++  // PDF only: operator list for table rules / image placements / vector shapes.
++  getReflowGraphics?: () => Promise<{
++    fnArray: ArrayLike<number>;
++    argsArray: ArrayLike<unknown>;
++    ops: Record<string, number>;
++    width: number;
++    height: number;
++    origin: [number, number];
++    rotation: number;
++  }>;
++  // PDF only: render one figure region (view-origin PDF space) to an object URL.
++  renderReflowRegion?: (
++    rect: { x0: number; y0: number; x1: number; y1: number },
++    maxWidth?: number,
++  ) => Promise<string | null>;
  
    // EPUB 3 Media Overlays: the manifest item of this section's SMIL file, or
    // null when the section has no recorded narration. Populated by foliate's
@@ -9303,10 +10123,10 @@ index 0000000..9961e02
 +}
 diff --git a/apps/readest-app/src/styles/pdf-reflow.css b/apps/readest-app/src/styles/pdf-reflow.css
 new file mode 100644
-index 0000000..3e2e37a
+index 0000000..3773258
 --- /dev/null
 +++ b/apps/readest-app/src/styles/pdf-reflow.css
-@@ -0,0 +1,91 @@
+@@ -0,0 +1,162 @@
 +.pdf-reflow-reader {
 +  position: absolute;
 +  inset: 0;
@@ -9346,6 +10166,70 @@ index 0000000..3e2e37a
 +  padding-inline-start: 12px;
 +  border-inline-start: 2px solid var(--color-base-300);
 +  white-space: pre-wrap;
++}
++.pdf-reflow-table-wrap {
++  margin: 0 0 1.3em;
++  overflow-x: auto;
++  -webkit-overflow-scrolling: touch;
++  border: 1px solid var(--color-base-300);
++  border-radius: 8px;
++  /* Horizontal pan inside the table, vertical pan stays with the page. */
++  touch-action: pan-x pan-y;
++}
++.pdf-reflow-table {
++  border-collapse: collapse;
++  width: max-content;
++  min-width: 100%;
++  font-size: 0.86em;
++  line-height: 1.5;
++}
++.pdf-reflow-table th,
++.pdf-reflow-table td {
++  padding: 0.45em 0.7em;
++  border: 1px solid var(--color-base-300);
++  vertical-align: top;
++  text-align: start;
++  white-space: pre-wrap;
++  overflow-wrap: break-word;
++  min-width: 4.5em;
++  max-width: 22em;
++}
++.pdf-reflow-table th {
++  font-weight: 600;
++  background: color-mix(in srgb, var(--color-base-content) 7%, var(--color-base-100));
++}
++.pdf-reflow-table td[data-numeric],
++.pdf-reflow-table th[data-numeric] {
++  text-align: end;
++  font-variant-numeric: tabular-nums;
++}
++.pdf-reflow-table tbody tr:nth-child(even) td {
++  background: color-mix(in srgb, var(--color-base-content) 3%, var(--color-base-100));
++}
++.pdf-reflow-figure {
++  margin: 0 auto 1.3em;
++  text-align: center;
++}
++.pdf-reflow-figure img {
++  display: block;
++  width: 100%;
++  height: auto;
++  border-radius: 6px;
++  background: #fff;
++  user-select: none;
++  -webkit-user-select: none;
++  -webkit-touch-callout: none;
++}
++.pdf-reflow-figure-skeleton {
++  width: 100%;
++  border-radius: 6px;
++  background: color-mix(in srgb, var(--color-base-content) 8%, var(--color-base-100));
++}
++.pdf-reflow-figure-failed {
++  padding: 12px;
++  font-size: 13px;
++  border: 1px dashed var(--color-base-300);
++  border-radius: 6px;
 +}
 +.pdf-reflow-warning {
 +  font-size: 14px;
@@ -9392,6 +10276,13 @@ index 0000000..3e2e37a
 +  .pdf-reflow-reader[data-chrome-panel='true'] .pdf-reflow-listening-dock {
 +    padding-block: 4px;
 +  }
++}
++html[data-eink='true'] .pdf-reflow-table th {
++  background: transparent;
++  border-width: 2px;
++}
++html[data-eink='true'] .pdf-reflow-table tbody tr:nth-child(even) td {
++  background: transparent;
 +}
 +html[data-eink='true'] .pdf-reflow-page mark[data-reflow-tts] {
 +  background: transparent;
@@ -9535,10 +10426,22 @@ index 0000000..9a305ab
 +};
 diff --git a/apps/readest-app/src/utils/pdfReflow.ts b/apps/readest-app/src/utils/pdfReflow.ts
 new file mode 100644
-index 0000000..f1a0c87
+index 0000000..818f797
 --- /dev/null
 +++ b/apps/readest-app/src/utils/pdfReflow.ts
-@@ -0,0 +1,306 @@
+@@ -0,0 +1,311 @@
++import type { PdfGraphics } from './pdfReflowGraphics';
++import { analyzeLayout, detectAlignedTables, type TableModel } from './pdfReflowLayout';
++import {
++  buildLines,
++  joinLines,
++  joinMapped,
++  median,
++  textSize,
++  type Line,
++  type Run,
++} from './pdfReflowLines';
++
 +export interface PdfTextItem {
 +  str: string;
 +  transform: number[];
@@ -9548,9 +10451,35 @@ index 0000000..f1a0c87
 +  dir?: string;
 +}
 +
++export interface ReflowTableCell {
++  /** Stable id shared by all cells of one table. */
++  id: number;
++  row: number;
++  col: number;
++  rowSpan: number;
++  colSpan: number;
++  header: boolean;
++  rows: number;
++  cols: number;
++  numeric: boolean;
++}
++
++export interface ReflowFigure {
++  /** PDF user-space rectangle relative to the page view origin (y up). */
++  x0: number;
++  y0: number;
++  x1: number;
++  y1: number;
++}
++
 +export interface ReflowBlock {
-+  kind: 'paragraph' | 'note';
++  /** `cell` blocks are table cells: one block per cell so every index-based
++   * service (speech highlight, selection, citation) keeps working unchanged.
++   * `figure` blocks have no text; the page region is rendered as a picture. */
++  kind: 'paragraph' | 'note' | 'cell' | 'figure';
 +  text: string;
++  table?: ReflowTableCell;
++  figure?: ReflowFigure;
 +}
 +
 +export interface ReflowPage {
@@ -9561,98 +10490,79 @@ index 0000000..f1a0c87
 +   * the source character offset for every displayed UTF-16 character (-1 = spacing). */
 +  sourceText?: string;
 +  sourceMap?: number[][];
++  /** Page size in PDF units, needed to render figure regions. */
++  pageWidth?: number;
++  pageHeight?: number;
 +}
-+
-+type Run = {
-+  text: string;
-+  source: number[];
-+  x: number;
-+  y: number;
-+  size: number;
-+  width: number;
-+  rotated: boolean;
-+};
-+type Line = {
-+  runs: Run[];
-+  y: number;
-+  size: number;
-+  x: number;
-+  end: number;
-+  text: string;
-+  source: number[];
-+};
 +
 +export const normalizePdfSpeechText = (text: string) =>
 +  text.normalize('NFKC').replace(/[\s\u00ad]/gu, '');
 +
-+function joinMapped(
-+  left: { text: string; source: number[] },
-+  right: { text: string; source: number[] },
-+  space: boolean,
-+  wrapped = false,
-+) {
-+  const text = joinText(left.text, right.text, space, wrapped);
-+  const b = right.text.trimStart().trimEnd();
-+  // joinText preserves the right's trailing whitespace only after a nonempty left.
-+  const rightText = left.text ? right.text.trimStart() : b;
-+  const prefix = text.length - rightText.length;
-+  const source = left.source.slice(0, Math.min(prefix, left.text.trimEnd().length));
-+  while (source.length < prefix) source.push(-1);
-+  const rightStart = right.text.length - right.text.trimStart().length;
-+  source.push(...right.source.slice(rightStart, rightStart + rightText.length));
-+  return { text, source };
++const NUMERIC_CELL = /^[\s\d.,:%$¥€£+\-−–()/]+$/u;
++
++interface Entry {
++  block: ReflowBlock;
++  source: number[];
++  top: number;
++  order: number;
 +}
 +
-+const cjk = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u;
-+const closing = /^[,.;:!?，。；：！？、）】》」』〉〕］｝％%…]/u;
-+const opening = /[(（【《「『〈〔［｛]$/u;
-+
-+function median(values: number[]): number {
-+  if (!values.length) return 0;
-+  const sorted = [...values].sort((a, b) => a - b);
-+  const mid = Math.floor(sorted.length / 2);
-+  return sorted.length % 2 ? sorted[mid]! : (sorted[mid - 1]! + sorted[mid]!) / 2;
-+}
-+
-+function textSize(runs: Run[]): number {
-+  const sorted = [...runs].sort((a, b) => a.size - b.size);
-+  const total = sorted.reduce((n, run) => n + Math.max(1, run.text.trim().length), 0);
-+  let weight = 0;
-+  for (const run of sorted) {
-+    weight += Math.max(1, run.text.trim().length);
-+    if (weight >= total / 2) return run.size;
++function tableEntries(
++  table: TableModel,
++  id: number,
++  pageWidth: number,
++  next: () => number,
++): Entry[] {
++  const entries: Entry[] = [];
++  const cells = [...table.cells].sort((a, b) => a.row - b.row || a.col - b.col);
++  for (const cell of cells) {
++    const { lines } = buildLines(cell.runs, pageWidth);
++    const joined = joinLines(lines);
++    const text = joined.text.trim() ? joined.text : '';
++    // Cell text is trimmed here; keep the source map aligned with it.
++    const lead = joined.text.length - joined.text.trimStart().length;
++    const source = joined.source.slice(lead, lead + text.trimEnd().length);
++    entries.push({
++      block: {
++        kind: 'cell',
++        text: text.trim(),
++        table: {
++          id,
++          row: cell.row,
++          col: cell.col,
++          rowSpan: cell.rowSpan,
++          colSpan: cell.colSpan,
++          header: cell.header,
++          rows: table.rows,
++          cols: table.cols,
++          numeric: !!text && NUMERIC_CELL.test(text) && /\d/u.test(text),
++        },
++      },
++      source: text ? source.slice(0, text.trim().length) : [],
++      top: table.rect.y1,
++      order: next(),
++    });
 +  }
-+  return 1;
-+}
-+
-+// Geometry decides word spacing inside a line. Across wrapped lines, Latin
-+// words need a space; CJK and punctuation do not. Only discretionary soft
-+// hyphens are removed: a visible hyphen may be part of a compound or identifier.
-+function joinText(left: string, right: string, space: boolean, wrapped = false): string {
-+  if (!left) return right.trim();
-+  if (!right.trim()) return left;
-+  const a = left.trimEnd();
-+  const b = right.trimStart();
-+  if (wrapped && a.endsWith('\u00ad')) return a.slice(0, -1) + b;
-+  if (wrapped && /[A-Za-z]-$/.test(a) && /^[a-z]/.test(b)) return a + b;
-+  const last = Array.from(a).pop() || '';
-+  const first = Array.from(b)[0] || '';
-+  if (cjk.test(last) || cjk.test(first) || closing.test(b) || opening.test(a)) return a + b;
-+  return a + (space ? ' ' : '') + b;
++  return entries;
 +}
 +
 +/**
-+ * Conservative, dependency-free reflow for single-column horizontal pages.
++ * Conservative, dependency-free reflow for horizontal pages.
 + * Coordinates are unmodified PDF coordinates (larger baseline y is higher).
 + * Warnings are stable codes: empty-text, rotated-text,
 + * possible-multiple-columns, invalid-text-item. Suspected columns are retained
 + * in visual row order, not silently discarded or claimed to be fully reflowed.
++ *
++ * When `graphics` (bitmaps, rules, vector shapes) is supplied, tables and
++ * figures are recognised and emitted as `cell` / `figure` blocks in reading
++ * order; without it the behaviour is the text-only reflow.
 + */
 +export function reflowPdfText(
 +  items: PdfTextItem[],
 +  pageWidth: number,
 +  pageHeight: number,
 +  withSourceMap = false,
++  graphics?: PdfGraphics,
 +): ReflowPage {
 +  const result: ReflowPage = { blocks: [], removedPageNumbers: [], warnings: [] };
 +  let sourceText = '';
@@ -9664,7 +10574,7 @@ index 0000000..f1a0c87
 +  const warn = (code: string) => {
 +    if (!result.warnings.includes(code)) result.warnings.push(code);
 +  };
-+  const runs: Run[] = [];
++  const allRuns: Run[] = [];
 +  for (const item of items) {
 +    const source: number[] = [];
 +    let text = '';
@@ -9692,7 +10602,7 @@ index 0000000..f1a0c87
 +    }
 +    const rotated = Math.abs(Math.atan2(b!, a!)) > 0.12 || item.dir === 'ttb';
 +    if (rotated) warn('rotated-text');
-+    runs.push({
++    allRuns.push({
 +      text,
 +      source,
 +      x: x!,
@@ -9702,11 +10612,1452 @@ index 0000000..f1a0c87
 +      rotated,
 +    });
 +  }
-+  if (!runs.length) {
++
++  const layout = analyzeLayout(allRuns, graphics, pageWidth, pageHeight);
++  const runs = layout.flowRuns;
++  const entries: Entry[] = [];
++  let order = 0;
++  const nextOrder = () => order++;
++  layout.tables.forEach((table, id) => {
++    entries.push(...tableEntries(table, id, pageWidth, nextOrder));
++  });
++  if (layout.figures.length) {
++    result.pageWidth = pageWidth;
++    result.pageHeight = pageHeight;
++  }
++  for (const figure of layout.figures)
++    entries.push({
++      block: { kind: 'figure', text: '', figure: { ...figure.rect } },
++      source: [],
++      top: figure.rect.y1,
++      order: nextOrder(),
++    });
++
++  if (!runs.length && !entries.length) {
 +    warn('empty-text');
 +    return result;
 +  }
 +
++  let { lines } = buildLines(runs, pageWidth);
++  // Rule-less aligned tables are found on baselines, after ruled ones.
++  const aligned = detectAlignedTables(lines, pageWidth);
++  aligned.tables.forEach((table, i) => {
++    entries.push(...tableEntries(table, layout.tables.length + i, pageWidth, nextOrder));
++  });
++  if (aligned.used.size) lines = lines.filter((line) => !aligned.used.has(line));
++  const wideGapRows = lines.filter((line) => line.wideGap).length;
++  const columns = wideGapRows >= 2;
++  if (columns) warn('possible-multiple-columns');
++
++  const kept = lines.filter((line, index) => {
++    if (!(pageHeight > 0) || !/^\d+$/.test(line.text)) return true;
++    // Four-digit years are deliberately preserved, including in page margins.
++    const number = Number(line.text);
++    if (number >= 1000 && number <= 2999) return true;
++    if (line.y > pageHeight * 0.075 && line.y < pageHeight * 0.925) return true;
++    const neighbors = [lines[index - 1], lines[index + 1]].filter((v): v is Line => !!v);
++    const isolated = neighbors.every(
++      (other) => Math.abs(other.y - line.y) > Math.max(line.size, other.size) * 1.5,
++    );
++    if (!isolated || line.runs.some((run) => run.rotated)) return true;
++    result.removedPageNumbers.push(line.text);
++    return false;
++  });
++  const separators = [
++    ...layout.tables.map((t) => t.rect),
++    ...aligned.tables.map((t) => t.rect),
++    ...layout.figures.map((f) => f.rect),
++  ];
++  if (kept.length) {
++    const bodySize = textSize(kept.flatMap((line) => line.runs));
++    const bodyLines = kept.filter(
++      (line) => line.size >= bodySize * 0.85 && line.size <= bodySize * 1.15,
++    );
++    const gaps = bodyLines
++      .slice(1)
++      .map((line, i) => bodyLines[i]!.y - line.y)
++      .filter((gap) => gap > bodySize * 0.6 && gap < bodySize * 2.1);
++    const leading = median(gaps) || bodySize * 1.3;
++    const leftMargin = Math.min(...kept.map((line) => line.x));
++    let previous: Line | undefined;
++    let current: Entry | undefined;
++    for (const line of kept) {
++      const kind: ReflowBlock['kind'] = line.size < bodySize * 0.85 ? 'note' : 'paragraph';
++      const gap = previous ? previous.y - line.y : Infinity;
++      const sizeChange =
++        previous && Math.max(previous.size, line.size) / Math.min(previous.size, line.size) > 1.18;
++      const indented =
++        previous &&
++        line.x - leftMargin > line.size * 1.2 &&
++        previous.x - leftMargin <= line.size * 0.7;
++      const rotated =
++        line.runs.some((run) => run.rotated) || previous?.runs.some((run) => run.rotated);
++      // A table or figure sitting between two lines always splits the block.
++      const separated =
++        !!previous &&
++        separators.some((rect) => {
++          const mid = (rect.y0 + rect.y1) / 2;
++          return mid < previous!.y && mid > line.y;
++        });
++      const limit = kind === 'note' ? line.size * 1.8 : Math.max(leading * 1.45, bodySize * 1.65);
++      if (
++        !current ||
++        current.block.kind !== kind ||
++        gap > limit ||
++        sizeChange ||
++        indented ||
++        columns ||
++        rotated ||
++        separated
++      ) {
++        current = {
++          block: { kind, text: line.text },
++          source: line.source,
++          top: line.y,
++          order: nextOrder(),
++        };
++        entries.push(current);
++      } else {
++        const joined = joinMapped(
++          { text: current.block.text, source: current.source },
++          line,
++          true,
++          true,
++        );
++        current.block.text = joined.text;
++        current.source = joined.source;
++      }
++      previous = line;
++    }
++  }
++  if (!entries.length) return result;
++
++  // Reading order: top to bottom. Text already comes in visual row order, so
++  // a stable sort only interleaves tables and figures at their vertical place.
++  entries.sort((a, b) => b.top - a.top || a.order - b.order);
++  for (const entry of entries) {
++    result.blocks.push(entry.block);
++    blockSources.push(entry.source);
++  }
++  return result;
++}
+diff --git a/apps/readest-app/src/utils/pdfReflowGraphics.ts b/apps/readest-app/src/utils/pdfReflowGraphics.ts
+new file mode 100644
+index 0000000..302b185
+--- /dev/null
++++ b/apps/readest-app/src/utils/pdfReflowGraphics.ts
+@@ -0,0 +1,371 @@
++/**
++ * Read-only extraction of the *geometry* that matters for reflow from a
++ * pdf.js operator list: bitmap placements, axis-aligned rules (table lines)
++ * and complex vector shapes (charts / diagrams). Nothing is rendered here.
++ *
++ * Coordinates are PDF user space relative to the page view origin (y up).
++ * Every failure path degrades to "no graphics": reflow then behaves exactly
++ * like the text-only mode.
++ */
++
++export interface Rect {
++  x0: number;
++  y0: number;
++  x1: number;
++  y1: number;
++}
++
++export interface RuleSegment {
++  /** Horizontal rules have y0 === y1, vertical rules have x0 === x1. */
++  x0: number;
++  y0: number;
++  x1: number;
++  y1: number;
++}
++
++export interface PdfGraphics {
++  /** Bitmap placements (images, stencil masks). */
++  images: Rect[];
++  /** Axis-aligned strokes and thin filled rectangles. */
++  segments: RuleSegment[];
++  /** Bounding boxes of curved / diagonal / polygon paths. */
++  shapes: Rect[];
++  /** Filled axis-aligned boxes that are not thin rules (bars, cell shading). */
++  fills: Rect[];
++}
++
++export interface PdfOperatorList {
++  fnArray: ArrayLike<number>;
++  argsArray: ArrayLike<unknown>;
++}
++
++type Matrix = [number, number, number, number, number, number];
++const IDENTITY: Matrix = [1, 0, 0, 1, 0, 0];
++
++// pdf.js >= 5 path buffer opcodes (DrawOPS). Verified against pdfjs-dist 6.x.
++const DRAW_MOVE = 0;
++const DRAW_LINE = 1;
++const DRAW_CURVE = 2;
++const DRAW_QUAD = 3;
++const DRAW_CLOSE = 4;
++
++/** `new = m × ctm` (PDF row-vector convention). */
++const multiply = (m: Matrix, ctm: Matrix): Matrix => [
++  m[0] * ctm[0] + m[1] * ctm[2],
++  m[0] * ctm[1] + m[1] * ctm[3],
++  m[2] * ctm[0] + m[3] * ctm[2],
++  m[2] * ctm[1] + m[3] * ctm[3],
++  m[4] * ctm[0] + m[5] * ctm[2] + ctm[4],
++  m[4] * ctm[1] + m[5] * ctm[3] + ctm[5],
++];
++
++const apply = (m: Matrix, x: number, y: number): [number, number] => [
++  m[0] * x + m[2] * y + m[4],
++  m[1] * x + m[3] * y + m[5],
++];
++
++const finite = (values: ArrayLike<unknown>, count: number): boolean => {
++  if (!values || values.length < count) return false;
++  for (let i = 0; i < count; i++) if (!Number.isFinite(values[i] as number)) return false;
++  return true;
++};
++
++const unitSquareBox = (m: Matrix): Rect => {
++  const points = [apply(m, 0, 0), apply(m, 1, 0), apply(m, 0, 1), apply(m, 1, 1)];
++  const xs = points.map((p) => p[0]);
++  const ys = points.map((p) => p[1]);
++  return { x0: Math.min(...xs), y0: Math.min(...ys), x1: Math.max(...xs), y1: Math.max(...ys) };
++};
++
++const EDGE_EPS = 0.4;
++const THIN_RULE = 2.6;
++
++interface Subpath {
++  points: Array<[number, number]>;
++  closed: boolean;
++  curved: boolean;
++}
++
++function decodePath(buffer: ArrayLike<number>, ctm: Matrix): Subpath[] {
++  const result: Subpath[] = [];
++  let current: Subpath | undefined;
++  const start = () => {
++    current = { points: [], closed: false, curved: false };
++    result.push(current);
++    return current;
++  };
++  for (let i = 0; i < buffer.length; ) {
++    const op = buffer[i++]!;
++    if (op === DRAW_MOVE) {
++      const sub = start();
++      sub.points.push(apply(ctm, buffer[i]!, buffer[i + 1]!));
++      i += 2;
++    } else if (op === DRAW_LINE) {
++      const sub = current ?? start();
++      sub.points.push(apply(ctm, buffer[i]!, buffer[i + 1]!));
++      i += 2;
++    } else if (op === DRAW_CURVE) {
++      const sub = current ?? start();
++      sub.curved = true;
++      for (let k = 0; k < 6; k += 2)
++        sub.points.push(apply(ctm, buffer[i + k]!, buffer[i + k + 1]!));
++      i += 6;
++    } else if (op === DRAW_QUAD) {
++      const sub = current ?? start();
++      sub.curved = true;
++      for (let k = 0; k < 4; k += 2)
++        sub.points.push(apply(ctm, buffer[i + k]!, buffer[i + k + 1]!));
++      i += 4;
++    } else if (op === DRAW_CLOSE) {
++      if (current) current.closed = true;
++    } else {
++      // Unknown opcode: the buffer layout is not what we expect.
++      return [];
++    }
++  }
++  return result;
++}
++
++const bboxOf = (points: Array<[number, number]>): Rect => {
++  let x0 = Infinity,
++    y0 = Infinity,
++    x1 = -Infinity,
++    y1 = -Infinity;
++  for (const [x, y] of points) {
++    x0 = Math.min(x0, x);
++    y0 = Math.min(y0, y);
++    x1 = Math.max(x1, x);
++    y1 = Math.max(y1, y);
++  }
++  return { x0, y0, x1, y1 };
++};
++
++function classifyPath(
++  subs: Subpath[],
++  stroke: boolean,
++  fill: boolean,
++  out: { segments: RuleSegment[]; shapes: Rect[]; fills: Rect[] },
++) {
++  for (const sub of subs) {
++    if (!sub.points.length) continue;
++    if (sub.curved) {
++      out.shapes.push(bboxOf(sub.points));
++      continue;
++    }
++    const pts = sub.points;
++    const closed =
++      sub.closed || (pts.length >= 4 && dist(pts[0]!, pts[pts.length - 1]!) < EDGE_EPS);
++    const edges: Array<[[number, number], [number, number]]> = [];
++    for (let i = 0; i + 1 < pts.length; i++) edges.push([pts[i]!, pts[i + 1]!]);
++    if (closed && pts.length >= 3) edges.push([pts[pts.length - 1]!, pts[0]!]);
++    const axisAligned = edges.every(
++      ([a, b]) => Math.abs(a[0] - b[0]) <= EDGE_EPS || Math.abs(a[1] - b[1]) <= EDGE_EPS,
++    );
++    const box = bboxOf(pts);
++    const w = box.x1 - box.x0;
++    const h = box.y1 - box.y0;
++    if (!axisAligned) {
++      if (Math.max(w, h) >= 3) out.shapes.push(box);
++      continue;
++    }
++    if (fill && !stroke && closed && pts.length >= 4) {
++      // A filled rectangle: thin ones are rules drawn as boxes, wide ones are
++      // cell shading / backgrounds and carry no structure for reflow.
++      if (Math.min(w, h) <= THIN_RULE && Math.max(w, h) >= 6) {
++        if (h <= w)
++          out.segments.push({
++            x0: box.x0,
++            y0: (box.y0 + box.y1) / 2,
++            x1: box.x1,
++            y1: (box.y0 + box.y1) / 2,
++          });
++        else
++          out.segments.push({
++            x0: (box.x0 + box.x1) / 2,
++            y0: box.y0,
++            x1: (box.x0 + box.x1) / 2,
++            y1: box.y1,
++          });
++      } else if (w >= 2 && h >= 2) out.fills.push(box);
++      continue;
++    }
++    if (!stroke) continue;
++    for (const [a, b] of edges) {
++      if (Math.abs(a[1] - b[1]) <= EDGE_EPS && Math.abs(a[0] - b[0]) >= 0.5)
++        out.segments.push({
++          x0: Math.min(a[0], b[0]),
++          y0: (a[1] + b[1]) / 2,
++          x1: Math.max(a[0], b[0]),
++          y1: (a[1] + b[1]) / 2,
++        });
++      else if (Math.abs(a[0] - b[0]) <= EDGE_EPS && Math.abs(a[1] - b[1]) >= 0.5)
++        out.segments.push({
++          x0: (a[0] + b[0]) / 2,
++          y0: Math.min(a[1], b[1]),
++          x1: (a[0] + b[0]) / 2,
++          y1: Math.max(a[1], b[1]),
++        });
++    }
++  }
++}
++
++const dist = (a: [number, number], b: [number, number]) => Math.hypot(a[0] - b[0], a[1] - b[1]);
++
++const shift = (rect: Rect, ox: number, oy: number): Rect => ({
++  x0: rect.x0 - ox,
++  y0: rect.y0 - oy,
++  x1: rect.x1 - ox,
++  y1: rect.y1 - oy,
++});
++
++const clampRect = (rect: Rect, width: number, height: number): Rect | null => {
++  const clamped = {
++    x0: Math.max(0, rect.x0),
++    y0: Math.max(0, rect.y0),
++    x1: Math.min(width, rect.x1),
++    y1: Math.min(height, rect.y1),
++  };
++  return clamped.x1 - clamped.x0 > 0.5 && clamped.y1 - clamped.y0 > 0.5 ? clamped : null;
++};
++
++/**
++ * @param ops   pdf.js `OPS` table (names → numbers), taken from the running
++ *              library so operator numbers are never hard-coded.
++ * @param origin page.view[0], page.view[1]
++ */
++export function extractPdfGraphics(
++  list: PdfOperatorList,
++  ops: Record<string, number>,
++  origin: [number, number],
++  pageWidth: number,
++  pageHeight: number,
++): PdfGraphics {
++  const result: PdfGraphics = { images: [], segments: [], shapes: [], fills: [] };
++  try {
++    const O = (name: string) => ops[name] ?? -1;
++    const SAVE = O('save'),
++      RESTORE = O('restore'),
++      TRANSFORM = O('transform'),
++      PATH = O('constructPath');
++    const FORM_BEGIN = O('paintFormXObjectBegin'),
++      FORM_END = O('paintFormXObjectEnd'),
++      GROUP_BEGIN = O('beginGroup'),
++      GROUP_END = O('endGroup');
++    const IMAGE = new Set(
++      ['paintImageXObject', 'paintInlineImageXObject', 'paintImageMaskXObject'].map(O),
++    );
++    const IMAGE_REPEAT = O('paintImageXObjectRepeat'),
++      MASK_REPEAT = O('paintImageMaskXObjectRepeat'),
++      MASK_GROUP = O('paintImageMaskXObjectGroup'),
++      INLINE_GROUP = O('paintInlineImageXObjectGroup');
++    const STROKE_OPS = new Set(
++      [
++        'stroke',
++        'closeStroke',
++        'fillStroke',
++        'eoFillStroke',
++        'closeFillStroke',
++        'closeEOFillStroke',
++      ].map(O),
++    );
++    const FILL_OPS = new Set(
++      ['fill', 'eoFill', 'fillStroke', 'eoFillStroke', 'closeFillStroke', 'closeEOFillStroke'].map(
++        O,
++      ),
++    );
++    if (PATH < 0 || TRANSFORM < 0) return result;
++
++    const rawSegments: RuleSegment[] = [];
++    const rawShapes: Rect[] = [];
++    const rawFills: Rect[] = [];
++    const rawImages: Rect[] = [];
++    let ctm: Matrix = IDENTITY;
++    const stack: Matrix[] = [];
++    const { fnArray, argsArray } = list;
++    for (let i = 0; i < fnArray.length; i++) {
++      const fn = fnArray[i]!;
++      const args = argsArray[i] as unknown[] | undefined;
++      try {
++        if (fn === SAVE || fn === GROUP_BEGIN) {
++          stack.push(ctm);
++        } else if (fn === RESTORE || fn === GROUP_END) {
++          ctm = stack.pop() ?? IDENTITY;
++        } else if (fn === TRANSFORM) {
++          if (args && finite(args as number[], 6)) ctm = multiply(args as unknown as Matrix, ctm);
++        } else if (fn === FORM_BEGIN) {
++          stack.push(ctm);
++          const matrix = args?.[0] as number[] | null | undefined;
++          if (matrix && finite(matrix, 6)) ctm = multiply(matrix as unknown as Matrix, ctm);
++        } else if (fn === FORM_END) {
++          ctm = stack.pop() ?? IDENTITY;
++        } else if (fn === PATH) {
++          const op = args?.[0] as number;
++          const stroke = STROKE_OPS.has(op);
++          const fill = FILL_OPS.has(op);
++          if (!stroke && !fill) continue;
++          const buffer = (args?.[1] as ArrayLike<number>[] | undefined)?.[0];
++          if (!buffer || typeof buffer.length !== 'number') continue;
++          classifyPath(decodePath(buffer, ctm), stroke, fill, {
++            segments: rawSegments,
++            shapes: rawShapes,
++            fills: rawFills,
++          });
++        } else if (IMAGE.has(fn)) {
++          rawImages.push(unitSquareBox(ctm));
++        } else if (fn === IMAGE_REPEAT) {
++          // [objId, scaleX, scaleY, positions]
++          const [, sx, sy, positions] = args as [unknown, number, number, ArrayLike<number>];
++          for (let k = 0; k + 1 < positions.length; k += 2)
++            rawImages.push(
++              unitSquareBox(multiply([sx, 0, 0, sy, positions[k]!, positions[k + 1]!], ctm)),
++            );
++        } else if (fn === MASK_REPEAT) {
++          // [img, scaleX, skewX, skewY, scaleY, positions]
++          const [, sx, kx, ky, sy, positions] = args as [
++            unknown,
++            number,
++            number,
++            number,
++            number,
++            ArrayLike<number>,
++          ];
++          for (let k = 0; k + 1 < positions.length; k += 2)
++            rawImages.push(
++              unitSquareBox(multiply([sx, kx, ky, sy, positions[k]!, positions[k + 1]!], ctm)),
++            );
++        } else if (fn === MASK_GROUP) {
++          for (const image of (args?.[0] as Array<{ transform?: number[] }>) ?? [])
++            if (image.transform && finite(image.transform, 6))
++              rawImages.push(unitSquareBox(multiply(image.transform as unknown as Matrix, ctm)));
++        } else if (fn === INLINE_GROUP) {
++          for (const entry of (args?.[1] as Array<{ transform?: number[] }>) ?? [])
++            if (entry.transform && finite(entry.transform, 6))
++              rawImages.push(unitSquareBox(multiply(entry.transform as unknown as Matrix, ctm)));
++        }
++      } catch {
++        // One malformed operator must not discard the page.
++      }
++    }
++    const [ox, oy] = origin;
++    for (const image of rawImages) {
++      const rect = clampRect(shift(image, ox, oy), pageWidth, pageHeight);
++      if (rect) result.images.push(rect);
++    }
++    for (const shape of rawShapes) {
++      const rect = clampRect(shift(shape, ox, oy), pageWidth, pageHeight);
++      if (rect) result.shapes.push(rect);
++    }
++    for (const fill of rawFills) {
++      const rect = clampRect(shift(fill, ox, oy), pageWidth, pageHeight);
++      if (rect) result.fills.push(rect);
++    }
++    for (const seg of rawSegments) {
++      const s = shift(seg, ox, oy);
++      if (s.x1 < 0 || s.x0 > pageWidth || s.y1 < 0 || s.y0 > pageHeight) continue;
++      result.segments.push(s);
++    }
++  } catch {
++    return { images: [], segments: [], shapes: [], fills: [] };
++  }
++  return result;
++}
+diff --git a/apps/readest-app/src/utils/pdfReflowGroups.ts b/apps/readest-app/src/utils/pdfReflowGroups.ts
+new file mode 100644
+index 0000000..fe2297e
+--- /dev/null
++++ b/apps/readest-app/src/utils/pdfReflowGroups.ts
+@@ -0,0 +1,35 @@
++import type { ReflowBlock } from './pdfReflow';
++
++export interface IndexedBlock {
++  block: ReflowBlock;
++  index: number;
++}
++
++export type ReflowGroup =
++  | { type: 'table'; id: number; rows: Array<{ row: number; cells: IndexedBlock[] }> }
++  | { type: 'block'; block: ReflowBlock; index: number };
++
++/** Gather the consecutive `cell` blocks of one table into rows. Block indices
++ * are preserved so speech highlights, selections and citations keep working. */
++export function groupReflowBlocks(blocks: ReflowBlock[]): ReflowGroup[] {
++  const groups: ReflowGroup[] = [];
++  let table: Extract<ReflowGroup, { type: 'table' }> | undefined;
++  blocks.forEach((block, index) => {
++    if (block.kind === 'cell' && block.table) {
++      if (!table || table.id !== block.table.id) {
++        table = { type: 'table', id: block.table.id, rows: [] };
++        groups.push(table);
++      }
++      let row = table.rows[table.rows.length - 1];
++      if (!row || row.row !== block.table.row) {
++        row = { row: block.table.row, cells: [] };
++        table.rows.push(row);
++      }
++      row.cells.push({ block, index });
++      return;
++    }
++    table = undefined;
++    groups.push({ type: 'block', block, index });
++  });
++  return groups;
++}
+diff --git a/apps/readest-app/src/utils/pdfReflowLayout.ts b/apps/readest-app/src/utils/pdfReflowLayout.ts
+new file mode 100644
+index 0000000..874e6ee
+--- /dev/null
++++ b/apps/readest-app/src/utils/pdfReflowLayout.ts
+@@ -0,0 +1,803 @@
++/**
++ * Layout analysis for PDF reflow: recognises tables (ruled grids, rule-only
++ * "booktabs" tables and rule-less aligned tables) and figures (bitmaps and
++ * dense vector graphics). Pure geometry on already-extracted data, no DOM,
++ * no rendering. Every detector is conservative: when evidence is weak the
++ * content simply stays in the normal text flow.
++ */
++import type { PdfGraphics, Rect } from './pdfReflowGraphics';
++import { buildLines, median, textSize, type Line, type Run } from './pdfReflowLines';
++
++export interface TableCellModel {
++  row: number;
++  col: number;
++  rowSpan: number;
++  colSpan: number;
++  runs: Run[];
++  header: boolean;
++}
++
++export interface TableModel {
++  rect: Rect;
++  rows: number;
++  cols: number;
++  headerRows: number;
++  /** Row-major; positions covered by a span are omitted. */
++  cells: TableCellModel[];
++}
++
++export interface FigureRegion {
++  rect: Rect;
++  /** True when the region contains vector drawing whose text labels belong to
++   * the picture and must not also appear in the text flow. */
++  suppressText: boolean;
++}
++
++export interface LayoutResult {
++  tables: TableModel[];
++  figures: FigureRegion[];
++  flowRuns: Run[];
++  /** Segments/rects consumed by tables, for diagnostics and tests. */
++  consumedSegments: number;
++}
++
++const TOL = 1.8;
++const JOIN_TOL = 2.8;
++
++const runCenter = (run: Run) => ({ x: run.x + run.width / 2, y: run.y + run.size * 0.3 });
++const inRect = (rect: Rect, x: number, y: number, pad = 0) =>
++  x >= rect.x0 - pad && x <= rect.x1 + pad && y >= rect.y0 - pad && y <= rect.y1 + pad;
++const areaOf = (rect: Rect) => Math.max(0, rect.x1 - rect.x0) * Math.max(0, rect.y1 - rect.y0);
++const touches = (a: Rect, b: Rect, pad = 0) =>
++  a.x0 <= b.x1 + pad && b.x0 <= a.x1 + pad && a.y0 <= b.y1 + pad && b.y0 <= a.y1 + pad;
++const unionRect = (a: Rect, b: Rect): Rect => ({
++  x0: Math.min(a.x0, b.x0),
++  y0: Math.min(a.y0, b.y0),
++  x1: Math.max(a.x1, b.x1),
++  y1: Math.max(a.y1, b.y1),
++});
++
++class UnionFind {
++  parent: number[];
++  constructor(n: number) {
++    this.parent = Array.from({ length: n }, (_, i) => i);
++  }
++  find(i: number): number {
++    while (this.parent[i] !== i) {
++      this.parent[i] = this.parent[this.parent[i]!]!;
++      i = this.parent[i]!;
++    }
++    return i;
++  }
++  union(a: number, b: number) {
++    const ra = this.find(a);
++    const rb = this.find(b);
++    if (ra !== rb) this.parent[ra] = rb;
++  }
++}
++
++interface Line1D {
++  pos: number;
++  a: number;
++  b: number;
++}
++
++/** Merge collinear, overlapping or abutting segments into long rules. */
++function mergeRules(values: Line1D[]): Line1D[] {
++  const sorted = [...values].sort((p, q) => p.pos - q.pos);
++  const clusters: Line1D[][] = [];
++  for (const value of sorted) {
++    const last = clusters[clusters.length - 1];
++    if (last && Math.abs(value.pos - last[0]!.pos) <= TOL) last.push(value);
++    else clusters.push([value]);
++  }
++  const result: Line1D[] = [];
++  for (const cluster of clusters) {
++    const pos = cluster.reduce((n, v) => n + v.pos, 0) / cluster.length;
++    const byStart = [...cluster].sort((p, q) => p.a - q.a);
++    let current = { pos, a: byStart[0]!.a, b: byStart[0]!.b };
++    for (const value of byStart.slice(1)) {
++      if (value.a <= current.b + JOIN_TOL) current.b = Math.max(current.b, value.b);
++      else {
++        result.push(current);
++        current = { pos, a: value.a, b: value.b };
++      }
++    }
++    result.push(current);
++  }
++  return result;
++}
++
++function clusterValues(values: number[]): number[] {
++  const sorted = [...values].sort((a, b) => a - b);
++  const groups: number[][] = [];
++  for (const value of sorted) {
++    const last = groups[groups.length - 1];
++    if (last && value - last[last.length - 1]! <= TOL + 0.7) last.push(value);
++    else groups.push([value]);
++  }
++  return groups.map((g) => g.reduce((n, v) => n + v, 0) / g.length);
++}
++
++const coverage = (rules: Line1D[], pos: number, from: number, to: number): number => {
++  const spans = rules
++    .filter((r) => Math.abs(r.pos - pos) <= TOL + 0.7)
++    .map((r) => [Math.max(from, r.a), Math.min(to, r.b)] as const)
++    .filter(([a, b]) => b > a)
++    .sort((p, q) => p[0] - q[0]);
++  let covered = 0;
++  let end = -Infinity;
++  for (const [a, b] of spans) {
++    const start = Math.max(a, end);
++    if (b > start) covered += b - start;
++    end = Math.max(end, b);
++  }
++  return to > from ? covered / (to - from) : 0;
++};
++
++const NUMERIC = /^[\s\d.,:%$¥€£+\-−–()/]+$/u;
++const hasDigit = /\d/u;
++
++/** Rows × columns of cell texts → does the first row look like a header? */
++function looksLikeHeader(rows: string[][]): boolean {
++  if (rows.length < 2) return false;
++  const first = rows[0]!.filter((t) => t.trim());
++  if (first.length < 2) return false;
++  if (first.some((t) => NUMERIC.test(t))) return false;
++  return rows.slice(1).some((row) => row.some((t) => t.trim() && hasDigit.test(t)));
++}
++
++const runsText = (runs: Run[]) =>
++  [...runs]
++    .sort((a, b) => b.y - a.y || a.x - b.x)
++    .map((r) => r.text)
++    .join(' ');
++
++/* ----------------------------- ruled grids ------------------------------ */
++
++function gridTable(
++  hRules: Line1D[],
++  vRules: Line1D[],
++  runs: Run[],
++): { model: TableModel | null; figureLike: boolean } {
++  const xs = clusterValues(vRules.map((v) => v.pos));
++  const ys = clusterValues(hRules.map((h) => h.pos)).sort((a, b) => b - a);
++  if (xs.length < 2 || ys.length < 2) return { model: null, figureLike: false };
++  const cols = xs.length - 1;
++  const rows = ys.length - 1;
++  if (cols * rows > 400) return { model: null, figureLike: true };
++  const rect: Rect = { x0: xs[0]!, x1: xs[cols]!, y0: ys[rows]!, y1: ys[0]! };
++
++  const verticalPresent = (c: number, r: number) =>
++    coverage(vRules, xs[c]!, ys[r + 1]!, ys[r]!) >= 0.6;
++  const horizontalPresent = (r: number, c: number) =>
++    coverage(hRules, ys[r]!, xs[c]!, xs[c + 1]!) >= 0.6;
++
++  const visited: boolean[][] = Array.from({ length: rows }, () => Array(cols).fill(false));
++  const cells: Array<Omit<TableCellModel, 'runs' | 'header'>> = [];
++  for (let r = 0; r < rows; r++) {
++    for (let c = 0; c < cols; c++) {
++      if (visited[r]![c]) continue;
++      let colSpan = 1;
++      while (c + colSpan < cols && !verticalPresent(c + colSpan, r)) colSpan++;
++      let rowSpan = 1;
++      const canExtend = (nextRow: number) => {
++        for (let cc = c; cc < c + colSpan; cc++) if (horizontalPresent(nextRow, cc)) return false;
++        // Internal verticals of the added row must be absent too.
++        for (let cc = c + 1; cc < c + colSpan; cc++) if (verticalPresent(cc, nextRow)) return false;
++        return true;
++      };
++      while (r + rowSpan < rows && canExtend(r + rowSpan)) rowSpan++;
++      let free = true;
++      for (let rr = r; rr < r + rowSpan && free; rr++)
++        for (let cc = c; cc < c + colSpan; cc++) if (visited[rr]![cc]) free = false;
++      if (!free) {
++        colSpan = 1;
++        rowSpan = 1;
++      }
++      for (let rr = r; rr < r + rowSpan; rr++)
++        for (let cc = c; cc < c + colSpan; cc++) visited[rr]![cc] = true;
++      cells.push({ row: r, col: c, rowSpan, colSpan });
++    }
++  }
++
++  const owner = new Map<string, number>();
++  cells.forEach((cell, index) => {
++    for (let rr = cell.row; rr < cell.row + cell.rowSpan; rr++)
++      for (let cc = cell.col; cc < cell.col + cell.colSpan; cc++) owner.set(`${rr}:${cc}`, index);
++  });
++  const assigned: Run[][] = cells.map(() => []);
++  const members: Run[] = [];
++  for (const run of runs) {
++    const { x, y } = runCenter(run);
++    if (!inRect(rect, x, y, 2.5)) continue;
++    let c = 0;
++    while (c + 1 < cols && x >= xs[c + 1]! - TOL) c++;
++    let r = 0;
++    while (r + 1 < rows && y <= ys[r + 1]! + TOL) r++;
++    const index = owner.get(`${r}:${c}`);
++    if (index === undefined) continue;
++    assigned[index]!.push(run);
++    members.push(run);
++  }
++  const filled = assigned.filter((list) => list.length).length;
++  if (filled < 2 || filled < cells.length * 0.4) return { model: null, figureLike: true };
++
++  const textRows: string[][] = Array.from({ length: rows }, () => Array(cols).fill(''));
++  cells.forEach((cell, index) => {
++    textRows[cell.row]![cell.col] = runsText(assigned[index]!);
++  });
++  const headerRows = looksLikeHeader(textRows) ? 1 : 0;
++  return {
++    figureLike: false,
++    model: {
++      rect,
++      rows,
++      cols,
++      headerRows,
++      cells: cells.map((cell, index) => ({
++        ...cell,
++        runs: assigned[index]!,
++        header: cell.row < headerRows,
++      })),
++    },
++  };
++}
++
++interface GridResult {
++  tables: TableModel[];
++  consumedRuns: Set<Run>;
++  leftoverHorizontals: Line1D[];
++  rejectedBoxes: Rect[];
++  consumed: number;
++}
++
++function detectGrids(hRaw: Line1D[], vRaw: Line1D[], runs: Run[]): GridResult {
++  const result: GridResult = {
++    tables: [],
++    consumedRuns: new Set(),
++    leftoverHorizontals: [],
++    rejectedBoxes: [],
++    consumed: 0,
++  };
++  const h = mergeRules(hRaw).filter((r) => r.b - r.a >= 8);
++  const v = mergeRules(vRaw).filter((r) => r.b - r.a >= 8);
++  if (h.length > 600 || v.length > 600) {
++    result.leftoverHorizontals = h;
++    return result;
++  }
++  const uf = new UnionFind(h.length + v.length);
++  for (let i = 0; i < h.length; i++)
++    for (let j = 0; j < v.length; j++) {
++      const hr = h[i]!;
++      const vr = v[j]!;
++      if (
++        vr.pos >= hr.a - JOIN_TOL &&
++        vr.pos <= hr.b + JOIN_TOL &&
++        hr.pos >= vr.a - JOIN_TOL &&
++        hr.pos <= vr.b + JOIN_TOL
++      )
++        uf.union(i, h.length + j);
++    }
++  const groups = new Map<number, { h: Line1D[]; v: Line1D[] }>();
++  h.forEach((rule, i) => {
++    const key = uf.find(i);
++    (groups.get(key) ?? groups.set(key, { h: [], v: [] }).get(key)!).h.push(rule);
++  });
++  v.forEach((rule, j) => {
++    const key = uf.find(h.length + j);
++    (groups.get(key) ?? groups.set(key, { h: [], v: [] }).get(key)!).v.push(rule);
++  });
++  for (const group of groups.values()) {
++    if (group.v.length < 2 || group.h.length < 2) {
++      result.leftoverHorizontals.push(...group.h);
++      continue;
++    }
++    const { model, figureLike } = gridTable(group.h, group.v, runs);
++    if (model && model.rows >= 2 && model.cols >= 2) {
++      result.tables.push(model);
++      result.consumed += group.h.length + group.v.length;
++      for (const cell of model.cells) for (const run of cell.runs) result.consumedRuns.add(run);
++    } else {
++      // A single framed box (call-out) or a sparse drawing grid: not a table.
++      if (figureLike) {
++        const xs = group.v.map((r) => r.pos);
++        const ys = group.h.map((r) => r.pos);
++        result.rejectedBoxes.push({
++          x0: Math.min(...xs),
++          x1: Math.max(...xs),
++          y0: Math.min(...ys),
++          y1: Math.max(...ys),
++        });
++      }
++      result.leftoverHorizontals.push(...group.h);
++    }
++  }
++  return result;
++}
++
++/* ------------------------- aligned (text) columns ------------------------ */
++
++interface Segment {
++  x0: number;
++  x1: number;
++  runs: Run[];
++  text: string;
++}
++
++function segmentLine(line: Line, gap: number): Segment[] {
++  const segments: Segment[] = [];
++  let current: Segment | undefined;
++  let end = -Infinity;
++  for (const run of line.runs) {
++    if (!current || run.x - end > gap) {
++      current = { x0: run.x, x1: run.x + run.width, runs: [], text: '' };
++      segments.push(current);
++    }
++    current.runs.push(run);
++    current.x1 = Math.max(current.x1, run.x + run.width);
++    end = Math.max(end, run.x + run.width);
++  }
++  for (const segment of segments) segment.text = runsText(segment.runs).trim();
++  return segments;
++}
++
++interface ColumnFit {
++  bands: Array<[number, number]>;
++  rows: Array<Array<{ col: number; colSpan: number; segment: Segment }>>;
++}
++
++/** Column bands come from the rows that carry the modal number of segments.
++ * Spanning headers and sparse rows are then placed against those bands. */
++function inferColumns(rows: Segment[][], minShare: number): ColumnFit | null {
++  const counts = new Map<number, number>();
++  for (const row of rows)
++    if (row.length >= 2) counts.set(row.length, (counts.get(row.length) ?? 0) + 1);
++  let modal = 0;
++  let best = 0;
++  for (const [count, times] of counts)
++    if (times > best || (times === best && count > modal)) {
++      modal = count;
++      best = times;
++    }
++  if (modal < 2 || best < Math.max(2, Math.ceil(rows.length * minShare))) return null;
++  const body = rows.filter((row) => row.length === modal);
++  const bands: Array<[number, number]> = [];
++  for (let j = 0; j < modal; j++)
++    bands.push([Math.min(...body.map((r) => r[j]!.x0)), Math.max(...body.map((r) => r[j]!.x1))]);
++  for (let j = 0; j + 1 < modal; j++) if (bands[j]![1] >= bands[j + 1]![0]) return null;
++  const placed = rows.map((row) =>
++    row.map((segment) => {
++      const hit: number[] = [];
++      bands.forEach((band, j) => {
++        if (Math.min(band[1], segment.x1) - Math.max(band[0], segment.x0) > 0) hit.push(j);
++      });
++      if (!hit.length) {
++        const mid = (segment.x0 + segment.x1) / 2;
++        let nearest = 0;
++        bands.forEach((band, j) => {
++          const d = Math.abs((band[0] + band[1]) / 2 - mid);
++          if (d < Math.abs((bands[nearest]![0] + bands[nearest]![1]) / 2 - mid)) nearest = j;
++        });
++        hit.push(nearest);
++      }
++      return { col: hit[0]!, colSpan: hit[hit.length - 1]! - hit[0]! + 1, segment };
++    }),
++  );
++  return { bands, rows: placed };
++}
++
++function modelFromRows(
++  fit: ColumnFit,
++  rect: Rect,
++  headerRowCount: number,
++  mergeContinuations: boolean,
++  lines: Line[],
++  leading: number,
++): TableModel | null {
++  type Placed = ColumnFit['rows'][number];
++  const rows: Array<{ cells: Placed; y: number }> = [];
++  fit.rows.forEach((cells, index) => {
++    const line = lines[index]!;
++    const previous = rows[rows.length - 1];
++    const firstEmpty = !cells.some((cell) => cell.col === 0);
++    if (
++      mergeContinuations &&
++      previous &&
++      firstEmpty &&
++      previous.cells.some((cell) => cell.col === 0) &&
++      previous.y - line.y <= leading * 1.3
++    ) {
++      previous.cells = [...previous.cells, ...cells];
++      previous.y = line.y;
++      return;
++    }
++    rows.push({ cells, y: line.y });
++  });
++  const cols = fit.bands.length;
++  if (rows.length < 2 || cols < 2) return null;
++  const cells: TableCellModel[] = [];
++  rows.forEach((row, r) => {
++    const byCol = new Map<number, Placed>();
++    for (const cell of row.cells)
++      (byCol.get(cell.col) ?? byCol.set(cell.col, []).get(cell.col)!).push(cell);
++    let c = 0;
++    while (c < cols) {
++      const group = byCol.get(c);
++      if (!group) {
++        cells.push({
++          row: r,
++          col: c,
++          rowSpan: 1,
++          colSpan: 1,
++          runs: [],
++          header: r < headerRowCount,
++        });
++        c++;
++        continue;
++      }
++      const span = Math.max(...group.map((cell) => cell.colSpan));
++      cells.push({
++        row: r,
++        col: c,
++        rowSpan: 1,
++        colSpan: Math.min(span, cols - c),
++        runs: group.flatMap((cell) => cell.segment.runs),
++        header: r < headerRowCount,
++      });
++      c += Math.min(span, cols - c);
++    }
++  });
++  return { rect, rows: rows.length, cols, headerRows: headerRowCount, cells };
++}
++
++const segmentRect = (rows: Segment[][], lines: Line[]): Rect => ({
++  x0: Math.min(...rows.flat().map((s) => s.x0)),
++  x1: Math.max(...rows.flat().map((s) => s.x1)),
++  y0: Math.min(...lines.map((l) => l.y - l.size * 0.25)),
++  y1: Math.max(...lines.map((l) => l.y + l.size * 0.9)),
++});
++
++/* ---------------------------- rule-only tables --------------------------- */
++
++function detectRuleTables(
++  rules: Line1D[],
++  runs: Run[],
++  pageWidth: number,
++  pageHeight: number,
++): { tables: TableModel[]; consumedRuns: Set<Run>; usedRules: Set<Line1D> } {
++  const out = {
++    tables: [] as TableModel[],
++    consumedRuns: new Set<Run>(),
++    usedRules: new Set<Line1D>(),
++  };
++  const minLength = Math.max(60, pageWidth * 0.2);
++  const long = rules.filter((r) => r.b - r.a >= minLength).sort((p, q) => q.pos - p.pos);
++  const sameExtent = (p: Line1D, q: Line1D) => {
++    const tol = Math.max(4, pageWidth * 0.035);
++    return Math.abs(p.a - q.a) <= tol && Math.abs(p.b - q.b) <= tol;
++  };
++  const groups: Line1D[][] = [];
++  let current: Line1D[] = [];
++  for (const rule of long) {
++    const first = current[0];
++    if (
++      first &&
++      sameExtent(first, rule) &&
++      first.pos - rule.pos <= pageHeight * 0.6 &&
++      runs.some((run) => run.y > rule.pos && run.y < current[current.length - 1]!.pos)
++    ) {
++      current.push(rule);
++    } else {
++      if (current.length >= 2) groups.push(current);
++      current = [rule];
++    }
++  }
++  if (current.length >= 2) groups.push(current);
++
++  for (const group of groups) {
++    const top = group[0]!;
++    const bottom = group[group.length - 1]!;
++    const x0 = Math.min(...group.map((r) => r.a));
++    const x1 = Math.max(...group.map((r) => r.b));
++    const inside = runs.filter((run) => {
++      if (out.consumedRuns.has(run) || run.rotated) return false;
++      const { x, y } = runCenter(run);
++      return y < top.pos + 1 && y > bottom.pos - 1 && x >= x0 - 3 && x <= x1 + 3;
++    });
++    if (inside.length < 4) continue;
++    const { lines } = buildLines(inside, pageWidth);
++    if (lines.length < 2) continue;
++    const size = median(lines.map((l) => l.size)) || 10;
++    const segments = lines.map((line) => segmentLine(line, size * 1.5));
++    const fit = inferColumns(segments, 0.5);
++    if (!fit) continue;
++    const gaps = lines.slice(1).map((line, i) => lines[i]!.y - line.y);
++    const leading = median(gaps) || size * 1.3;
++    // Rows above the first inner rule form the header.
++    const inner = group.slice(1, -1);
++    const headerRows = inner.length
++      ? lines.filter((line) => line.y > inner[0]!.pos).length
++      : looksLikeHeader(segments.map((row) => row.map((s) => s.text)))
++        ? 1
++        : 0;
++    const model = modelFromRows(
++      fit,
++      { x0, x1, y0: bottom.pos, y1: top.pos },
++      headerRows,
++      true,
++      lines,
++      leading,
++    );
++    if (!model) continue;
++    out.tables.push(model);
++    for (const run of inside) out.consumedRuns.add(run);
++    for (const rule of group) out.usedRules.add(rule);
++  }
++  return out;
++}
++
++/* ------------------------- rule-less aligned tables ---------------------- */
++
++function detectAlignedTables(
++  lines: Line[],
++  pageWidth: number,
++): { tables: TableModel[]; used: Set<Line> } {
++  const out = { tables: [] as TableModel[], used: new Set<Line>() };
++  const flat = lines.filter((line) => !line.runs.some((run) => run.rotated));
++  if (flat.length < 3) return out;
++  const size = median(flat.map((l) => l.size)) || 10;
++  const gaps = flat
++    .slice(1)
++    .map((line, i) => flat[i]!.y - line.y)
++    .filter((g) => g > size * 0.6 && g < size * 3);
++  const leading = median(gaps) || size * 1.4;
++  const segments = new Map<Line, Segment[]>();
++  for (const line of flat) segments.set(line, segmentLine(line, Math.max(line.size * 1.5, 9)));
++
++  let group: Line[] = [];
++  const flush = () => {
++    if (group.length >= 3) {
++      const rows = group.map((line) => segments.get(line)!);
++      const fit = inferColumns(rows, 0.6);
++      const cellTexts = rows.flat().map((s) => s.text);
++      const shortish =
++        cellTexts.filter((t) => t.length <= 18 || hasDigit.test(t)).length >=
++        cellTexts.length * 0.5;
++      const meanLength =
++        cellTexts.reduce((n, t) => n + t.length, 0) / Math.max(1, cellTexts.length);
++      if (fit && shortish && meanLength <= 26 && pageWidth > 0) {
++        const header = looksLikeHeader(rows.map((row) => row.map((s) => s.text))) ? 1 : 0;
++        const model = modelFromRows(fit, segmentRect(rows, group), header, false, group, leading);
++        if (model) {
++          out.tables.push(model);
++          for (const line of group) out.used.add(line);
++        }
++      }
++    }
++    group = [];
++  };
++  for (let i = 0; i < flat.length; i++) {
++    const line = flat[i]!;
++    const count = segments.get(line)!.length;
++    const previous = group[group.length - 1];
++    const close = !previous || previous.y - line.y <= leading * 2.4;
++    if (!close) flush();
++    if (count >= 2) group.push(line);
++    else {
++      // A single-segment line may sit inside a table (spanning header or a
++      // wrapped label) only when a multi-segment line follows right after.
++      const next = flat[i + 1];
++      if (
++        group.length &&
++        next &&
++        segments.get(next)!.length >= 2 &&
++        group[group.length - 1]!.y - line.y <= leading * 1.5
++      )
++        group.push(line);
++      else flush();
++    }
++  }
++  flush();
++  return out;
++}
++
++/* -------------------------------- figures -------------------------------- */
++
++const mergeOverlapping = (rects: Array<Rect & { vector: boolean }>, pad: number) => {
++  const items = rects.map((r) => ({ ...r }));
++  let changed = true;
++  while (changed) {
++    changed = false;
++    outer: for (let i = 0; i < items.length; i++)
++      for (let j = i + 1; j < items.length; j++)
++        if (touches(items[i]!, items[j]!, pad)) {
++          items[i] = {
++            ...unionRect(items[i]!, items[j]!),
++            vector: items[i]!.vector || items[j]!.vector,
++          };
++          items.splice(j, 1);
++          changed = true;
++          break outer;
++        }
++  }
++  return items;
++};
++
++function detectFigures(
++  graphics: PdfGraphics,
++  tables: Rect[],
++  usedRules: Set<Line1D>,
++  extraBoxes: Rect[],
++  runs: Run[],
++  pageWidth: number,
++  pageHeight: number,
++  bodySize: number,
++): FigureRegion[] {
++  const pageArea = pageWidth * pageHeight;
++  if (!(pageArea > 0)) return [];
++  const insideTable = (rect: Rect) => {
++    const cx = (rect.x0 + rect.x1) / 2;
++    const cy = (rect.y0 + rect.y1) / 2;
++    return tables.some((table) => inRect(table, cx, cy, 2));
++  };
++
++  const candidates: Array<Rect & { vector: boolean }> = [];
++  // Raster images. Drop decorations, inline glyph images and page backgrounds.
++  for (const image of graphics.images) {
++    const w = image.x1 - image.x0;
++    const h = image.y1 - image.y0;
++    if (insideTable(image)) continue;
++    const area = w * h;
++    const background = area >= pageArea * 0.6 && runs.length > 0;
++    if (background) continue;
++    const midY = (image.y0 + image.y1) / 2;
++    const inline =
++      h <= bodySize * 1.8 &&
++      runs.some((run) => Math.abs(run.y + run.size * 0.3 - midY) <= Math.max(h, bodySize) * 0.8);
++    if (inline) continue;
++    if (area < pageArea * 0.004 && (w < 40 || h < 40)) continue;
++    candidates.push({ ...image, vector: false });
++  }
++
++  // Vector drawings: cluster shapes/filled boxes/rules that touch each other.
++  const members: Rect[] = [];
++  for (const shape of [...graphics.shapes, ...graphics.fills]) {
++    const w = shape.x1 - shape.x0;
++    const h = shape.y1 - shape.y0;
++    if (Math.max(w, h) < 6 || insideTable(shape)) continue;
++    // Full-width bands are backgrounds / dividers, not drawing content.
++    if (w > pageWidth * 0.85 && h < pageHeight * 0.12) continue;
++    members.push(shape);
++  }
++  for (const seg of graphics.segments) {
++    const rect = { x0: seg.x0, y0: seg.y0, x1: seg.x1, y1: seg.y1 };
++    if (insideTable(rect)) continue;
++    const length = Math.hypot(seg.x1 - seg.x0, seg.y1 - seg.y0);
++    if (length < 6) continue;
++    if (
++      [...usedRules].some(
++        (r) => Math.abs(r.pos - (seg.y0 + seg.y1) / 2) <= TOL && seg.y0 === seg.y1,
++      )
++    )
++      continue;
++    members.push(rect);
++  }
++  for (const box of extraBoxes) members.push(box);
++  if (members.length >= 6 && members.length <= 4000) {
++    const uf = new UnionFind(members.length);
++    const order = members.map((_, i) => i).sort((a, b) => members[a]!.x0 - members[b]!.x0);
++    for (let oi = 0; oi < order.length; oi++) {
++      const i = order[oi]!;
++      for (let oj = oi + 1; oj < order.length; oj++) {
++        const j = order[oj]!;
++        if (members[j]!.x0 > members[i]!.x1 + 8) break;
++        if (touches(members[i]!, members[j]!, 8)) uf.union(i, j);
++      }
++    }
++    const clusters = new Map<number, number[]>();
++    members.forEach((_, i) =>
++      (clusters.get(uf.find(i)) ?? clusters.set(uf.find(i), []).get(uf.find(i))!).push(i),
++    );
++    for (const ids of clusters.values()) {
++      if (ids.length < 6) continue;
++      let box = members[ids[0]!]!;
++      for (const id of ids) box = unionRect(box, members[id]!);
++      const w = box.x1 - box.x0;
++      const h = box.y1 - box.y0;
++      if (w < 70 || h < 50 || w * h > pageArea * 0.85) continue;
++      const chars = runs
++        .filter((run) => {
++          const { x, y } = runCenter(run);
++          return inRect(box, x, y, 1);
++        })
++        .reduce((n, run) => n + run.text.trim().length, 0);
++      // Prose or table-like boxes carry ~8-12 characters per 1000 pt²; charts
++      // and diagrams are far sparser.
++      if ((chars / (w * h)) * 1000 >= 5) continue;
++      candidates.push({ ...box, vector: true });
++    }
++  }
++
++  const merged = mergeOverlapping(candidates, 3);
++  const figures: FigureRegion[] = [];
++  for (const item of merged) {
++    const rect: Rect = {
++      x0: Math.max(0, item.x0 - 2),
++      y0: Math.max(0, item.y0 - 2),
++      x1: Math.min(pageWidth, item.x1 + 2),
++      y1: Math.min(pageHeight, item.y1 + 2),
++    };
++    if (rect.x1 - rect.x0 < 12 || rect.y1 - rect.y0 < 12) continue;
++    if (!tables.some((t) => touches(t, rect) && areaOf(t) > areaOf(rect) * 0.6))
++      figures.push({ rect, suppressText: item.vector });
++  }
++  return figures.sort((a, b) => b.rect.y1 - a.rect.y1);
++}
++
++/* ------------------------------ orchestration ---------------------------- */
++
++export function analyzeLayout(
++  runs: Run[],
++  graphics: PdfGraphics | undefined,
++  pageWidth: number,
++  pageHeight: number,
++): LayoutResult {
++  const result: LayoutResult = { tables: [], figures: [], flowRuns: runs, consumedSegments: 0 };
++  if (!graphics) return result;
++  const upright = runs.filter((run) => !run.rotated);
++  const bodySize = upright.length ? textSize(upright) : 10;
++
++  const hRules: Line1D[] = [];
++  const vRules: Line1D[] = [];
++  for (const seg of graphics.segments) {
++    if (seg.y0 === seg.y1)
++      hRules.push({ pos: seg.y0, a: Math.min(seg.x0, seg.x1), b: Math.max(seg.x0, seg.x1) });
++    else if (seg.x0 === seg.x1)
++      vRules.push({ pos: seg.x0, a: Math.min(seg.y0, seg.y1), b: Math.max(seg.y0, seg.y1) });
++  }
++  const consumed = new Set<Run>();
++  const grids = detectGrids(hRules, vRules, upright);
++  grids.consumedRuns.forEach((run) => consumed.add(run));
++  const ruleOnly = detectRuleTables(
++    grids.leftoverHorizontals,
++    upright.filter((run) => !consumed.has(run)),
++    pageWidth,
++    pageHeight,
++  );
++  ruleOnly.consumedRuns.forEach((run) => consumed.add(run));
++  const tables = [...grids.tables, ...ruleOnly.tables];
++  result.consumedSegments = grids.consumed + ruleOnly.usedRules.size;
++
++  const figures = detectFigures(
++    graphics,
++    tables.map((t) => t.rect),
++    ruleOnly.usedRules,
++    grids.rejectedBoxes,
++    upright.filter((run) => !consumed.has(run)),
++    pageWidth,
++    pageHeight,
++    bodySize,
++  );
++  // Axis ticks, legends and node labels sit just outside the drawing's
++  // bounding box. Absorb short, body-or-smaller labels hugging a vector figure;
++  // full sentences (captions) stay in the text flow.
++  const suppressed = (run: Run) => {
++    const { x, y } = runCenter(run);
++    const text = run.text.trim();
++    const label =
++      text.length <= 14 && (run.size <= bodySize * 0.95 || /^[\d.,%+\-−–\s]+$/u.test(text));
++    return figures.some(
++      (figure) =>
++        figure.suppressText &&
++        (inRect(figure.rect, x, y, 1) ||
++          (label && inRect(figure.rect, x, y, Math.max(10, run.size * 1.6)))),
++    );
++  };
++  result.tables = tables;
++  result.figures = figures;
++  result.flowRuns = runs.filter((run) => !consumed.has(run) && !suppressed(run));
++  return result;
++}
++
++export { detectAlignedTables };
+diff --git a/apps/readest-app/src/utils/pdfReflowLines.ts b/apps/readest-app/src/utils/pdfReflowLines.ts
+new file mode 100644
+index 0000000..10ce658
+--- /dev/null
++++ b/apps/readest-app/src/utils/pdfReflowLines.ts
+@@ -0,0 +1,165 @@
++/** Run/line construction shared by flow text, table cells and layout analysis.
++ * Coordinates are unmodified PDF coordinates (larger baseline y is higher). */
++
++export type Run = {
++  text: string;
++  source: number[];
++  x: number;
++  y: number;
++  size: number;
++  width: number;
++  rotated: boolean;
++};
++
++export type Line = {
++  runs: Run[];
++  y: number;
++  size: number;
++  x: number;
++  end: number;
++  text: string;
++  source: number[];
++  /** A large mid-page gap suggests this row crosses columns. */
++  wideGap?: boolean;
++};
++
++export function joinMapped(
++  left: { text: string; source: number[] },
++  right: { text: string; source: number[] },
++  space: boolean,
++  wrapped = false,
++) {
++  const text = joinText(left.text, right.text, space, wrapped);
++  const b = right.text.trimStart().trimEnd();
++  // joinText preserves the right's trailing whitespace only after a nonempty left.
++  const rightText = left.text ? right.text.trimStart() : b;
++  const prefix = text.length - rightText.length;
++  const source = left.source.slice(0, Math.min(prefix, left.text.trimEnd().length));
++  while (source.length < prefix) source.push(-1);
++  const rightStart = right.text.length - right.text.trimStart().length;
++  source.push(...right.source.slice(rightStart, rightStart + rightText.length));
++  return { text, source };
++}
++
++const cjk = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u;
++const closing = /^[,.;:!?，。；：！？、）】》」』〉〕］｝％%…]/u;
++const opening = /[(（【《「『〈〔［｛]$/u;
++
++export function median(values: number[]): number {
++  if (!values.length) return 0;
++  const sorted = [...values].sort((a, b) => a - b);
++  const mid = Math.floor(sorted.length / 2);
++  return sorted.length % 2 ? sorted[mid]! : (sorted[mid - 1]! + sorted[mid]!) / 2;
++}
++
++export function textSize(runs: Run[]): number {
++  const sorted = [...runs].sort((a, b) => a.size - b.size);
++  const total = sorted.reduce((n, run) => n + Math.max(1, run.text.trim().length), 0);
++  let weight = 0;
++  for (const run of sorted) {
++    weight += Math.max(1, run.text.trim().length);
++    if (weight >= total / 2) return run.size;
++  }
++  return 1;
++}
++
++// Geometry decides word spacing inside a line. Across wrapped lines, Latin
++// words need a space; CJK and punctuation do not. Only discretionary soft
++// hyphens are removed: a visible hyphen may be part of a compound or identifier.
++export function joinText(left: string, right: string, space: boolean, wrapped = false): string {
++  if (!left) return right.trim();
++  if (!right.trim()) return left;
++  const a = left.trimEnd();
++  const b = right.trimStart();
++  if (wrapped && a.endsWith('\u00ad')) return a.slice(0, -1) + b;
++  if (wrapped && /[A-Za-z]-$/.test(a) && /^[a-z]/.test(b)) return a + b;
++  const last = Array.from(a).pop() || '';
++  const first = Array.from(b)[0] || '';
++  if (cjk.test(last) || cjk.test(first) || closing.test(b) || opening.test(a)) return a + b;
++  return a + (space ? ' ' : '') + b;
++}
++
++/** Group runs into baselines and join each baseline left-to-right.
++ * `wideGapRows` counts rows with a large mid-page gap (possible columns). */
++export function buildLines(runs: Run[], pageWidth: number): { lines: Line[]; wideGapRows: number } {
 +  // Seed lines with large glyphs first so a superscript cannot pull the body
 +  // baseline upward. Font-scaled tolerance avoids fixed-point assumptions.
 +  const lines: Line[] = [];
@@ -9776,74 +12127,17 @@ index 0000000..f1a0c87
 +      line.source = joined.source;
 +      previous = run;
 +    }
++    line.wideGap = wideGap;
 +    if (wideGap) wideGapRows++;
 +  }
-+  const columns = wideGapRows >= 2;
-+  if (columns) warn('possible-multiple-columns');
++  return { lines, wideGapRows };
++}
 +
-+  const kept = lines.filter((line, index) => {
-+    if (!(pageHeight > 0) || !/^\d+$/.test(line.text)) return true;
-+    // Four-digit years are deliberately preserved, including in page margins.
-+    const number = Number(line.text);
-+    if (number >= 1000 && number <= 2999) return true;
-+    if (line.y > pageHeight * 0.075 && line.y < pageHeight * 0.925) return true;
-+    const neighbors = [lines[index - 1], lines[index + 1]].filter((v): v is Line => !!v);
-+    const isolated = neighbors.every(
-+      (other) => Math.abs(other.y - line.y) > Math.max(line.size, other.size) * 1.5,
-+    );
-+    if (!isolated || line.runs.some((run) => run.rotated)) return true;
-+    result.removedPageNumbers.push(line.text);
-+    return false;
-+  });
-+  if (!kept.length) return result;
-+  const bodySize = textSize(kept.flatMap((line) => line.runs));
-+  const bodyLines = kept.filter(
-+    (line) => line.size >= bodySize * 0.85 && line.size <= bodySize * 1.15,
-+  );
-+  const gaps = bodyLines
-+    .slice(1)
-+    .map((line, i) => bodyLines[i]!.y - line.y)
-+    .filter((gap) => gap > bodySize * 0.6 && gap < bodySize * 2.1);
-+  const leading = median(gaps) || bodySize * 1.3;
-+  const leftMargin = Math.min(...kept.map((line) => line.x));
-+  let previous: Line | undefined;
-+  for (const line of kept) {
-+    const kind: ReflowBlock['kind'] = line.size < bodySize * 0.85 ? 'note' : 'paragraph';
-+    const last = result.blocks[result.blocks.length - 1];
-+    const gap = previous ? previous.y - line.y : Infinity;
-+    const sizeChange =
-+      previous && Math.max(previous.size, line.size) / Math.min(previous.size, line.size) > 1.18;
-+    const indented =
-+      previous &&
-+      line.x - leftMargin > line.size * 1.2 &&
-+      previous.x - leftMargin <= line.size * 0.7;
-+    const rotated =
-+      line.runs.some((run) => run.rotated) || previous?.runs.some((run) => run.rotated);
-+    const limit = kind === 'note' ? line.size * 1.8 : Math.max(leading * 1.45, bodySize * 1.65);
-+    if (
-+      !last ||
-+      last.kind !== kind ||
-+      gap > limit ||
-+      sizeChange ||
-+      indented ||
-+      columns ||
-+      rotated
-+    ) {
-+      result.blocks.push({ kind, text: line.text });
-+      blockSources.push(line.source);
-+    } else {
-+      const joined = joinMapped(
-+        { text: last.text, source: blockSources[blockSources.length - 1]! },
-+        line,
-+        true,
-+        true,
-+      );
-+      last.text = joined.text;
-+      blockSources[blockSources.length - 1] = joined.source;
-+    }
-+    previous = line;
-+  }
-+  return result;
++/** Join top-to-bottom lines (e.g. the lines inside one table cell) into one text. */
++export function joinLines(lines: Line[]): { text: string; source: number[] } {
++  let acc = { text: '', source: [] as number[] };
++  for (const line of lines) acc = joinMapped(acc, line, true, true);
++  return acc;
 +}
 diff --git a/apps/readest-app/src/utils/pdfReflowSelection.ts b/apps/readest-app/src/utils/pdfReflowSelection.ts
 new file mode 100644

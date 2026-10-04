@@ -1,8 +1,8 @@
 diff --git a/pdf.js b/pdf.js
-index c389f98..2c74b20 100644
+index c389f98..5ed300f 100644
 --- a/pdf.js
 +++ b/pdf.js
-@@ -717,6 +717,26 @@ export const makePDF = async file => {
+@@ -717,6 +717,75 @@ export const makePDF = async file => {
      }
      book.sections = Array.from({ length: pdf.numPages }).map((_, i) => ({
          id: i,
@@ -24,6 +24,55 @@ index c389f98..2c74b20 100644
 +                width: x2 - x1,
 +                height: y2 - y1,
 +                rotation: page.rotate,
++            }
++        },
++        // Read-only geometry source: the worker already builds this operator
++        // list for rendering. Only placements are read from it by the reader.
++        getReflowGraphics: async () => {
++            const page = await getPage(i)
++            const list = await page.getOperatorList()
++            const [x1, y1, x2, y2] = page.view
++            return {
++                fnArray: list.fnArray,
++                argsArray: list.argsArray,
++                ops: { ...pdfjsLib.OPS },
++                width: x2 - x1,
++                height: y2 - y1,
++                origin: [x1, y1],
++                rotation: page.rotate,
++            }
++        },
++        // Renders only one figure region (view-origin PDF space, y up) to a
++        // PNG object URL. Upright (rotation 0) pages only.
++        renderReflowRegion: async (rect, maxWidth = 1100) => {
++            const page = await getPage(i)
++            if (page.rotate % 360 !== 0) return null
++            const [x1, y1, x2, y2] = page.view
++            const width = rect.x1 - rect.x0
++            const height = rect.y1 - rect.y0
++            if (!(width > 0 && height > 0)) return null
++            const scale = Math.min(3, Math.max(0.5, maxWidth / width))
++            const viewport = page.getViewport({ scale })
++            const canvas = document.createElement('canvas')
++            canvas.width = Math.max(1, Math.round(width * scale))
++            canvas.height = Math.max(1, Math.round(height * scale))
++            const context = canvas.getContext('2d')
++            context.fillStyle = '#fff'
++            context.fillRect(0, 0, canvas.width, canvas.height)
++            // viewport maps (X, Y) -> (s(X - x1), s(y2 - Y)); region top-left is
++            // (rect.x0, rect.y1) in view-origin space, i.e. Y = rect.y1 + y1.
++            const task = page.render({
++                canvasContext: context,
++                viewport,
++                transform: [1, 0, 0, 1, -scale * rect.x0, -scale * (y2 - y1 - rect.y1)],
++                background: 'rgba(255,255,255,1)',
++            })
++            try {
++                await task.promise
++                const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'))
++                return blob ? URL.createObjectURL(blob) : null
++            } finally {
++                canvas.width = canvas.height = 0
 +            }
 +        },
          load: async () => {
