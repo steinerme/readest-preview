@@ -4365,10 +4365,10 @@ index 0000000..7f1c06a
 +});
 diff --git a/apps/readest-app/src/__tests__/utils/pdfReflowLayout.test.ts b/apps/readest-app/src/__tests__/utils/pdfReflowLayout.test.ts
 new file mode 100644
-index 0000000..313d1dc
+index 0000000..74e935e
 --- /dev/null
 +++ b/apps/readest-app/src/__tests__/utils/pdfReflowLayout.test.ts
-@@ -0,0 +1,168 @@
+@@ -0,0 +1,256 @@
 +import { describe, expect, it } from 'vitest';
 +import { extractPdfGraphics, type PdfGraphics } from '@/utils/pdfReflowGraphics';
 +import { reflowPdfText, type PdfTextItem } from '@/utils/pdfReflow';
@@ -4535,6 +4535,94 @@ index 0000000..313d1dc
 +      images: [{ x0: 120, y0: 698, x1: 132, y1: 710 }],
 +    });
 +    expect(page.blocks.map((b) => b.kind)).toEqual(['paragraph']);
++  });
++});
++
++describe('sparse tables with mixed-size cells (real book page geometry)', () => {
++  // Coordinates copied from a Chinese popular-science PDF: 8pt labels sit
++  // beside 22pt/17pt figures printed vertically centred in each row.
++  const sized = (str: string, x: number, y: number, size: number, width?: number): PdfTextItem => ({
++    str,
++    transform: [size, 0, 0, size, x, y],
++    width: width ?? str.length * size,
++    height: size,
++  });
++  const body = (str: string, y: number) => sized(str, 65, y, 13.5, 482);
++  const page128 = [
++    sized('总表面积（6面）', 103, 709, 10.1, 78),
++    sized('6', 185, 688, 22.5, 11),
++    sized(' ', 196, 688, 22.5, 81),
++    sized('24', 257, 695, 17.4, 18),
++    sized('体积（边长）', 103, 632, 10.1, 63),
++    sized('3', 166, 636, 10.1, 5),
++    sized('1', 185, 615, 22.5, 11),
++    sized(' ', 196, 615, 22.5, 134),
++    sized('8（重', 297, 636, 10.1, 26),
++    sized('量）', 297, 623, 10.1, 21),
++    sized('总表面积与体积', 103, 564, 10.1, 73),
++    sized('比', 103, 551, 10.1, 10),
++    sized('6', 185, 542, 22.5, 11),
++    sized('3', 257, 549, 17.4, 9),
++    body('正如以上所看到的，大方块冰单位体积所占的表面积要小于八个小方块。', 459),
++    body('总面积即正方体冰块六个表面所有的面积。这表明八个立方体冰块的总表面积', 441),
++  ];
++
++  it('reads labels and large figures as one 3x3 table without a column warning', () => {
++    const result = reflowPdfText(page128, 612, 792, true, empty);
++    expect(result.warnings).not.toContain('possible-multiple-columns');
++    const cells = result.blocks.filter((b) => b.kind === 'cell');
++    expect(cells.map((c) => c.text)).toEqual([
++      '总表面积（6面）',
++      '6',
++      '24',
++      '体积（边长）3',
++      '1',
++      '8（重量）',
++      '总表面积与体积比',
++      '6',
++      '3',
++    ]);
++    expect(cells[0]!.table).toMatchObject({ rows: 3, cols: 3 });
++    // Body text stays in the flow after the table.
++    expect(result.blocks.filter((b) => b.kind === 'paragraph')).toHaveLength(1);
++  });
++
++  it('keeps the table caption out of the table and ignores padding spaces', () => {
++    const items = [
++      body('说明文字说明文字说明文字说明文字说明文字说明文字', 400),
++      sized('表 1 大方块冰和小方块冰的数据变化', 76, 251, 10.1, 168),
++      sized('小方块冰', 197, 237, 10.1, 41),
++      sized(' ', 238, 237, 10.1, 58),
++      sized('大方块冰', 282, 237, 10.1, 41),
++      sized('边长', 103, 191, 10.1, 20),
++      sized('1', 185, 170, 22.5, 11),
++      sized('2', 257, 176, 17.4, 9),
++      sized('横切面面积', 103, 119, 10.1, 52),
++      sized('1', 185, 98, 22.5, 11),
++      sized('4', 257, 104, 17.4, 9),
++    ];
++    const result = reflowPdfText(items, 612, 792, true, empty);
++    const cells = result.blocks.filter((b) => b.kind === 'cell');
++    expect(cells.map((c) => c.text)).toEqual([
++      '',
++      '小方块冰',
++      '大方块冰',
++      '边长',
++      '1',
++      '2',
++      '横切面面积',
++      '1',
++      '4',
++    ]);
++    expect(result.blocks.some((b) => b.kind !== 'cell' && b.text.startsWith('表 1'))).toBe(true);
++  });
++
++  it('does not turn ordinary wrapped paragraphs into a table', () => {
++    const lines = Array.from({ length: 10 }, (_, i) =>
++      body(`这是第${i}行正文文字，用来确认普通段落不会被误判为表格结构。`, 700 - i * 17),
++    );
++    const result = reflowPdfText(lines, 612, 792, true, empty);
++    expect(result.blocks.some((b) => b.kind === 'cell')).toBe(false);
 +  });
 +});
 diff --git a/apps/readest-app/src/__tests__/utils/pdfReflowReal.test.ts b/apps/readest-app/src/__tests__/utils/pdfReflowReal.test.ts
@@ -10426,12 +10514,17 @@ index 0000000..9a305ab
 +};
 diff --git a/apps/readest-app/src/utils/pdfReflow.ts b/apps/readest-app/src/utils/pdfReflow.ts
 new file mode 100644
-index 0000000..818f797
+index 0000000..110f9cb
 --- /dev/null
 +++ b/apps/readest-app/src/utils/pdfReflow.ts
-@@ -0,0 +1,311 @@
+@@ -0,0 +1,325 @@
 +import type { PdfGraphics } from './pdfReflowGraphics';
-+import { analyzeLayout, detectAlignedTables, type TableModel } from './pdfReflowLayout';
++import {
++  analyzeLayout,
++  detectAlignedTables,
++  detectSparseTables,
++  type TableModel,
++} from './pdfReflowLayout';
 +import {
 +  buildLines,
 +  joinLines,
@@ -10639,10 +10732,18 @@ index 0000000..818f797
 +  }
 +
 +  let { lines } = buildLines(runs, pageWidth);
-+  // Rule-less aligned tables are found on baselines, after ruled ones.
++  // Tables whose cells differ in size/baseline are found on row blocks first;
++  // rule-less aligned tables are then found on the remaining baselines.
++  const sparse = detectSparseTables(lines, pageWidth);
++  sparse.tables.forEach((table, i) => {
++    entries.push(...tableEntries(table, layout.tables.length + i, pageWidth, nextOrder));
++  });
++  if (sparse.used.size) lines = lines.filter((line) => !sparse.used.has(line));
 +  const aligned = detectAlignedTables(lines, pageWidth);
 +  aligned.tables.forEach((table, i) => {
-+    entries.push(...tableEntries(table, layout.tables.length + i, pageWidth, nextOrder));
++    entries.push(
++      ...tableEntries(table, layout.tables.length + sparse.tables.length + i, pageWidth, nextOrder),
++    );
 +  });
 +  if (aligned.used.size) lines = lines.filter((line) => !aligned.used.has(line));
 +  const wideGapRows = lines.filter((line) => line.wideGap).length;
@@ -10666,6 +10767,7 @@ index 0000000..818f797
 +  const separators = [
 +    ...layout.tables.map((t) => t.rect),
 +    ...aligned.tables.map((t) => t.rect),
++    ...sparse.tables.map((t) => t.rect),
 +    ...layout.figures.map((f) => f.rect),
 +  ];
 +  if (kept.length) {
@@ -11161,10 +11263,10 @@ index 0000000..fe2297e
 +}
 diff --git a/apps/readest-app/src/utils/pdfReflowLayout.ts b/apps/readest-app/src/utils/pdfReflowLayout.ts
 new file mode 100644
-index 0000000..874e6ee
+index 0000000..5169794
 --- /dev/null
 +++ b/apps/readest-app/src/utils/pdfReflowLayout.ts
-@@ -0,0 +1,803 @@
+@@ -0,0 +1,960 @@
 +/**
 + * Layout analysis for PDF reflow: recognises tables (ruled grids, rule-only
 + * "booktabs" tables and rule-less aligned tables) and figures (bitmaps and
@@ -11497,6 +11599,8 @@ index 0000000..874e6ee
 +  let current: Segment | undefined;
 +  let end = -Infinity;
 +  for (const run of line.runs) {
++    // Blank runs are padding: they neither start a segment nor extend one.
++    if (!run.text.trim()) continue;
 +    if (!current || run.x - end > gap) {
 +      current = { x0: run.x, x1: run.x + run.width, runs: [], text: '' };
 +      segments.push(current);
@@ -11528,6 +11632,10 @@ index 0000000..874e6ee
 +      best = times;
 +    }
 +  if (modal < 2 || best < Math.max(2, Math.ceil(rows.length * minShare))) return null;
++  // Wrapped continuation rows carry fewer segments than full rows and can
++  // outnumber them; prefer the widest layout that still repeats.
++  for (const [count, times] of counts)
++    if (count > modal && times >= 2 && times >= best * 0.5) modal = count;
 +  const body = rows.filter((row) => row.length === modal);
 +  const bands: Array<[number, number]> = [];
 +  for (let j = 0; j < modal; j++)
@@ -11676,7 +11784,7 @@ index 0000000..874e6ee
 +    const { lines } = buildLines(inside, pageWidth);
 +    if (lines.length < 2) continue;
 +    const size = median(lines.map((l) => l.size)) || 10;
-+    const segments = lines.map((line) => segmentLine(line, size * 1.5));
++    const segments = lines.map((line) => segmentLine(line, size * 1.0));
 +    const fit = inferColumns(segments, 0.5);
 +    if (!fit) continue;
 +    const gaps = lines.slice(1).map((line, i) => lines[i]!.y - line.y);
@@ -11720,7 +11828,7 @@ index 0000000..874e6ee
 +    .filter((g) => g > size * 0.6 && g < size * 3);
 +  const leading = median(gaps) || size * 1.4;
 +  const segments = new Map<Line, Segment[]>();
-+  for (const line of flat) segments.set(line, segmentLine(line, Math.max(line.size * 1.5, 9)));
++  for (const line of flat) segments.set(line, segmentLine(line, Math.max(line.size * 1.1, 8)));
 +
 +  let group: Line[] = [];
 +  const flush = () => {
@@ -11764,6 +11872,157 @@ index 0000000..874e6ee
 +        group.push(line);
 +      else flush();
 +    }
++  }
++  flush();
++  return out;
++}
++
++/* ------------------- sparse tables with mixed-size cells ------------------ */
++
++const SCRIPT_TEXT = /^[\d()*†‡+\-−]{1,3}$/u;
++
++/** Footnote marks / superscripts printed beside a cell label sit on their own
++ * baseline; pull them onto the host run's baseline so they stay in that cell. */
++function attachScripts(runs: Run[]): Run[] {
++  const isFragment = (run: Run) => SCRIPT_TEXT.test(run.text.trim());
++  return runs.map((run) => {
++    if (!isFragment(run)) return run;
++    let host: Run | undefined;
++    for (const other of runs) {
++      if (other === run || isFragment(other) || !other.text.trim()) continue;
++      const gap = run.x - (other.x + other.width);
++      const dy = Math.abs(run.y - other.y);
++      if (
++        gap >= -1 &&
++        gap <= other.size * 0.6 &&
++        dy > 0.15 * other.size &&
++        dy <= 0.7 * other.size &&
++        run.size <= other.size * 1.05 &&
++        (!host || gap < run.x - (host.x + host.width))
++      )
++        host = other;
++    }
++    return host ? { ...run, y: host.y } : run;
++  });
++}
++
++/**
++ * Rows whose cells have different font sizes and baselines (small labels
++ * beside large, vertically centred figures) cannot be found on baselines.
++ * Here a row is a vertical block: consecutive lines closer than ~1.6 line
++ * heights belong together, a larger gap starts the next row. Columns are then
++ * inferred from the horizontal runs of every row, exactly like aligned tables.
++ */
++function detectSparseTables(
++  lines: Line[],
++  pageWidth: number,
++): { tables: TableModel[]; used: Set<Line> } {
++  const out = { tables: [] as TableModel[], used: new Set<Line>() };
++  const flat = lines.filter((line) => !line.runs.some((run) => run.rotated));
++  if (flat.length < 6 || !(pageWidth > 0)) return out;
++
++  // A caption ("表 1 …", "Table 2 …") always stands alone, even when printed
++  // close above the header row.
++  const caption = /^(表|图|Table|Fig\.?|Figure)\s*\d/u;
++  const clusters: Line[][] = [];
++  let afterCaption = false;
++  for (const line of flat) {
++    const current = clusters[clusters.length - 1];
++    const previous = current?.[current.length - 1];
++    const isCaption = caption.test(line.text.trim());
++    if (
++      previous &&
++      !isCaption &&
++      !afterCaption &&
++      previous.y - line.y <= 1.6 * Math.max(previous.size, line.size)
++    )
++      current!.push(line);
++    else clusters.push([line]);
++    afterCaption = isCaption;
++  }
++
++  interface Row {
++    lines: Line[];
++    runs: Run[];
++    segments: Segment[];
++  }
++  const build = (cluster: Line[]): Row | null => {
++    const runs = attachScripts(cluster.flatMap((line) => line.runs));
++    const gap = Math.max(5, textSize(runs) * 0.6);
++    // Blank runs (wide padding spaces) must not glue neighbouring cells together.
++    const sorted = runs.filter((run) => run.text.trim()).sort((a, b) => a.x - b.x || b.y - a.y);
++    const segments: Segment[] = [];
++    let end = -Infinity;
++    for (const run of sorted) {
++      const last = segments[segments.length - 1];
++      const previous = last?.runs[last.runs.length - 1];
++      // A figure printed at twice the label size starts its own cell even when
++      // the horizontal gap is small.
++      const sizeJump =
++        !!previous &&
++        // A small digit/mark beside a larger run is a superscript, not a cell.
++        !SCRIPT_TEXT.test((run.size < previous.size ? run : previous).text.trim()) &&
++        Math.max(run.size, previous.size) / Math.min(run.size, previous.size) >= 1.5;
++      if (!last || run.x - end > gap || sizeJump) {
++        segments.push({ x0: run.x, x1: run.x + run.width, runs: [run], text: '' });
++      } else {
++        last.runs.push(run);
++        last.x1 = Math.max(last.x1, run.x + run.width);
++      }
++      end = Math.max(end, run.x + run.width);
++    }
++    for (const segment of segments) segment.text = runsText(segment.runs).trim();
++    const tooLong = segments.some(
++      (segment) => segment.text.length > 30 || segment.x1 - segment.x0 > pageWidth * 0.5,
++    );
++    return tooLong ? null : { lines: cluster, runs, segments };
++  };
++
++  let group: Row[] = [];
++  let lastLine: Line | undefined;
++  const flush = () => {
++    // Captions / titles above or below are single-segment rows: keep them in the flow.
++    for (;;) {
++      const first = group[0];
++      if (first && (first.segments.length < 2 || caption.test(first.segments[0]!.text)))
++        group.shift();
++      else break;
++    }
++    while (group.length && group[group.length - 1]!.segments.length < 2) group.pop();
++    if (group.length >= 3) {
++      const rows = group.map((row) => row.segments);
++      const fit = inferColumns(rows, 0.6);
++      const texts = rows.flat().map((segment) => segment.text);
++      const meanLength = texts.reduce((n, t) => n + t.length, 0) / Math.max(1, texts.length);
++      if (fit && meanLength <= 26) {
++        const header = looksLikeHeader(rows.map((row) => row.map((segment) => segment.text)))
++          ? 1
++          : 0;
++        const allLines = group.flatMap((row) => row.lines);
++        const model = modelFromRows(
++          fit,
++          segmentRect(rows, allLines),
++          header,
++          false,
++          group.map((row) => row.lines[0]!),
++          0,
++        );
++        if (model) {
++          out.tables.push(model);
++          for (const line of allLines) out.used.add(line);
++        }
++      }
++    }
++    group = [];
++  };
++  for (const cluster of clusters) {
++    const row = build(cluster);
++    const top = cluster[0]!;
++    // A big vertical hole ends the table region.
++    if (lastLine && lastLine.y - top.y > 6 * Math.max(lastLine.size, top.size)) flush();
++    if (row) group.push(row);
++    else flush();
++    lastLine = cluster[cluster.length - 1];
 +  }
 +  flush();
 +  return out;
@@ -11967,7 +12226,7 @@ index 0000000..874e6ee
 +  return result;
 +}
 +
-+export { detectAlignedTables };
++export { detectAlignedTables, detectSparseTables };
 diff --git a/apps/readest-app/src/utils/pdfReflowLines.ts b/apps/readest-app/src/utils/pdfReflowLines.ts
 new file mode 100644
 index 0000000..10ce658
@@ -12338,10 +12597,10 @@ index 21de8b3..d04b76f 100644
  const frameRect = (frame: Frame, rect?: Rect, sx = 1, sy = 1) => {
 diff --git a/docs/pdf-reflow.md b/docs/pdf-reflow.md
 new file mode 100644
-index 0000000..3caf40f
+index 0000000..096f194
 --- /dev/null
 +++ b/docs/pdf-reflow.md
-@@ -0,0 +1,89 @@
+@@ -0,0 +1,91 @@
 +# PDF 文字重排（单栏文字版）
 +
 +## 入口与使用
@@ -12365,7 +12624,9 @@ index 0000000..3caf40f
 +## 范围
 +
 +适用：有正常文字层的单栏横排 PDF，正文和独立小字注释。
-+不支持：OCR、复杂双栏结构还原、公式/表格/图片重建、AI 纠错或改写。
++表格与图片：有格线表、仅有横线的三线表、无线的对齐表，以及"小号标签 + 大号数字、基线不对齐"的稀疏表（按行块分格，表题如“表 1 …”不并入表格）会重排为真正的表格；位图和密集矢量图（图表）按原页区域裁切后嵌入正文。识别不确定时保持普通文本流，不强行成表。
++
++不支持：OCR、复杂双栏结构还原、公式重建、AI 纠错或改写。
 +设置内说明适用局限，空页和旋转页明确回退原版。页眉/页脚仅保守去除孤立边缘数字页码，不笼统删除重复文字。
 +可能多栏的检测只是启发式，不能发现所有复杂布局。文字层缺字、编码问题或 PDF 绘制成图像的文字无法靠此功能补回。
 +
