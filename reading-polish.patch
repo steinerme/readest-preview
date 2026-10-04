@@ -4365,10 +4365,10 @@ index 0000000..7f1c06a
 +});
 diff --git a/apps/readest-app/src/__tests__/utils/pdfReflowLayout.test.ts b/apps/readest-app/src/__tests__/utils/pdfReflowLayout.test.ts
 new file mode 100644
-index 0000000..74e935e
+index 0000000..9df067d
 --- /dev/null
 +++ b/apps/readest-app/src/__tests__/utils/pdfReflowLayout.test.ts
-@@ -0,0 +1,256 @@
+@@ -0,0 +1,312 @@
 +import { describe, expect, it } from 'vitest';
 +import { extractPdfGraphics, type PdfGraphics } from '@/utils/pdfReflowGraphics';
 +import { reflowPdfText, type PdfTextItem } from '@/utils/pdfReflow';
@@ -4622,6 +4622,62 @@ index 0000000..74e935e
 +      body(`这是第${i}行正文文字，用来确认普通段落不会被误判为表格结构。`, 700 - i * 17),
 +    );
 +    const result = reflowPdfText(lines, 612, 792, true, empty);
++    expect(result.blocks.some((b) => b.kind === 'cell')).toBe(false);
++  });
++});
++
++describe('page watermarks, paper fills and code listings', () => {
++  const OPS = {
++    save: 10,
++    restore: 11,
++    transform: 12,
++    constructPath: 91,
++    paintImageXObject: 85,
++  };
++  it('drops a bitmap stamped many times (tiled watermark) and tilted stamps', () => {
++    const fn: number[] = [];
++    const args: unknown[] = [];
++    for (let i = 0; i < 6; i++) {
++      fn.push(OPS.save, OPS.transform, OPS.paintImageXObject, OPS.restore);
++      args.push(null, [117, 117, -16, 16, 40 + i * 80, 100 + i * 60], ['wm'], null);
++    }
++    // One genuine upright figure with its own id survives.
++    fn.push(OPS.save, OPS.transform, OPS.paintImageXObject, OPS.restore);
++    args.push(null, [300, 0, 0, 200, 100, 300], ['fig'], null);
++    const result = extractPdfGraphics({ fnArray: fn, argsArray: args }, OPS, [0, 0], 612, 792);
++    expect(result.images).toHaveLength(1);
++    expect(result.images[0]).toMatchObject({ x0: 100, x1: 400 });
++  });
++
++  it('never turns a full-page paper fill plus scattered shapes into a figure', () => {
++    const shapes = Array.from({ length: 8 }, (_, i) => ({
++      x0: 100 + i * 40,
++      y0: 600,
++      x1: 120 + i * 40,
++      y1: 610,
++    }));
++    const result = run([item('正文', 100, 700)], {
++      fills: [{ x0: 28, y0: 100, x1: 585, y1: 792 }],
++      shapes,
++    });
++    expect(result.blocks.some((b) => b.kind === 'figure')).toBe(false);
++  });
++
++  it('keeps code listing lines (code + trailing comment) out of tables', () => {
++    const code = (str: string, x: number, y: number, w: number): PdfTextItem => ({
++      str,
++      transform: [8.8, 0, 0, 8.8, x, y],
++      width: w,
++      height: 8.8,
++    });
++    const items: PdfTextItem[] = [];
++    for (let i = 0; i < 6; i++) {
++      items.push(code(`value_${i} = compute(${i})`, 105, 700 - i * 14, 120));
++      items.push(code(`# 第${i}步的说明`, 300, 700 - i * 14, 60));
++    }
++    const result = run(items, {
++      fills: [{ x0: 78, y0: 600, x1: 535, y1: 720 }],
++    });
 +    expect(result.blocks.some((b) => b.kind === 'cell')).toBe(false);
 +  });
 +});
@@ -10514,10 +10570,10 @@ index 0000000..9a305ab
 +};
 diff --git a/apps/readest-app/src/utils/pdfReflow.ts b/apps/readest-app/src/utils/pdfReflow.ts
 new file mode 100644
-index 0000000..110f9cb
+index 0000000..7bd00bc
 --- /dev/null
 +++ b/apps/readest-app/src/utils/pdfReflow.ts
-@@ -0,0 +1,325 @@
+@@ -0,0 +1,338 @@
 +import type { PdfGraphics } from './pdfReflowGraphics';
 +import {
 +  analyzeLayout,
@@ -10734,12 +10790,23 @@ index 0000000..110f9cb
 +  let { lines } = buildLines(runs, pageWidth);
 +  // Tables whose cells differ in size/baseline are found on row blocks first;
 +  // rule-less aligned tables are then found on the remaining baselines.
-+  const sparse = detectSparseTables(lines, pageWidth);
++  const inCode = (line: Line) => {
++    const mid = line.y + line.size * 0.3;
++    return layout.codeBoxes.some(
++      (box) => line.x >= box.x0 - 2 && line.end <= box.x1 + 2 && mid >= box.y0 && mid <= box.y1,
++    );
++  };
++  const codeLines = new Set(lines.filter(inCode));
++  const tableCandidates = lines.filter((line) => !codeLines.has(line));
++  const sparse = detectSparseTables(tableCandidates, pageWidth);
 +  sparse.tables.forEach((table, i) => {
 +    entries.push(...tableEntries(table, layout.tables.length + i, pageWidth, nextOrder));
 +  });
 +  if (sparse.used.size) lines = lines.filter((line) => !sparse.used.has(line));
-+  const aligned = detectAlignedTables(lines, pageWidth);
++  const aligned = detectAlignedTables(
++    lines.filter((line) => !codeLines.has(line)),
++    pageWidth,
++  );
 +  aligned.tables.forEach((table, i) => {
 +    entries.push(
 +      ...tableEntries(table, layout.tables.length + sparse.tables.length + i, pageWidth, nextOrder),
@@ -10809,6 +10876,8 @@ index 0000000..110f9cb
 +        sizeChange ||
 +        indented ||
 +        columns ||
++        codeLines.has(line) ||
++        (!!previous && codeLines.has(previous)) ||
 +        rotated ||
 +        separated
 +      ) {
@@ -10845,10 +10914,10 @@ index 0000000..110f9cb
 +}
 diff --git a/apps/readest-app/src/utils/pdfReflowGraphics.ts b/apps/readest-app/src/utils/pdfReflowGraphics.ts
 new file mode 100644
-index 0000000..302b185
+index 0000000..c4b4934
 --- /dev/null
 +++ b/apps/readest-app/src/utils/pdfReflowGraphics.ts
-@@ -0,0 +1,371 @@
+@@ -0,0 +1,392 @@
 +/**
 + * Read-only extraction of the *geometry* that matters for reflow from a
 + * pdf.js operator list: bitmap placements, axis-aligned rules (table lines)
@@ -10926,6 +10995,15 @@ index 0000000..302b185
 +  const xs = points.map((p) => p[0]);
 +  const ys = points.map((p) => p[1]);
 +  return { x0: Math.min(...xs), y0: Math.min(...ys), x1: Math.max(...xs), y1: Math.max(...ys) };
++};
++
++/** True when the image's x axis is not (close to) a multiple of 90°. Page
++ * watermarks are typically stamped at 30–45°; real figures are upright. */
++const tilted = (m: Matrix): boolean => {
++  if (Math.hypot(m[0], m[1]) < 1e-6) return false;
++  const angle = (Math.atan2(m[1], m[0]) * 180) / Math.PI;
++  const off = Math.abs(((angle % 90) + 90) % 90);
++  return Math.min(off, 90 - off) > 3;
 +};
 +
 +const EDGE_EPS = 0.4;
@@ -11130,6 +11208,12 @@ index 0000000..302b185
 +    const rawShapes: Rect[] = [];
 +    const rawFills: Rect[] = [];
 +    const rawImages: Rect[] = [];
++    const imageIds: Array<string | undefined> = [];
++    const pushImage = (rect: Rect, id?: unknown, skewed = false) => {
++      if (skewed) return;
++      rawImages.push(rect);
++      imageIds.push(typeof id === 'string' ? id : undefined);
++    };
 +    let ctm: Matrix = IDENTITY;
 +    const stack: Matrix[] = [];
 +    const { fnArray, argsArray } = list;
@@ -11162,7 +11246,7 @@ index 0000000..302b185
 +            fills: rawFills,
 +          });
 +        } else if (IMAGE.has(fn)) {
-+          rawImages.push(unitSquareBox(ctm));
++          pushImage(unitSquareBox(ctm), args?.[0], tilted(ctm));
 +        } else if (fn === IMAGE_REPEAT) {
 +          // [objId, scaleX, scaleY, positions]
 +          const [, sx, sy, positions] = args as [unknown, number, number, ArrayLike<number>];
@@ -11198,10 +11282,16 @@ index 0000000..302b185
 +      }
 +    }
 +    const [ox, oy] = origin;
-+    for (const image of rawImages) {
++    // The same bitmap stamped four or more times is a tiled watermark or
++    // texture, never a figure.
++    const uses = new Map<string, number>();
++    for (const id of imageIds) if (id) uses.set(id, (uses.get(id) ?? 0) + 1);
++    rawImages.forEach((image, index) => {
++      const id = imageIds[index];
++      if (id && (uses.get(id) ?? 0) >= 4) return;
 +      const rect = clampRect(shift(image, ox, oy), pageWidth, pageHeight);
 +      if (rect) result.images.push(rect);
-+    }
++    });
 +    for (const shape of rawShapes) {
 +      const rect = clampRect(shift(shape, ox, oy), pageWidth, pageHeight);
 +      if (rect) result.shapes.push(rect);
@@ -11263,10 +11353,10 @@ index 0000000..fe2297e
 +}
 diff --git a/apps/readest-app/src/utils/pdfReflowLayout.ts b/apps/readest-app/src/utils/pdfReflowLayout.ts
 new file mode 100644
-index 0000000..5169794
+index 0000000..56cf56a
 --- /dev/null
 +++ b/apps/readest-app/src/utils/pdfReflowLayout.ts
-@@ -0,0 +1,960 @@
+@@ -0,0 +1,980 @@
 +/**
 + * Layout analysis for PDF reflow: recognises tables (ruled grids, rule-only
 + * "booktabs" tables and rule-less aligned tables) and figures (bitmaps and
@@ -11306,6 +11396,8 @@ index 0000000..5169794
 +  tables: TableModel[];
 +  figures: FigureRegion[];
 +  flowRuns: Run[];
++  /** Large shaded boxes (code listings, call-outs): their lines never form tables. */
++  codeBoxes: Rect[];
 +  /** Segments/rects consumed by tables, for diagnostics and tests. */
 +  consumedSegments: number;
 +}
@@ -12092,6 +12184,10 @@ index 0000000..5169794
 +    const w = shape.x1 - shape.x0;
 +    const h = shape.y1 - shape.y0;
 +    if (Math.max(w, h) < 6 || insideTable(shape)) continue;
++    // A page-sized fill is the paper colour, not drawing content.
++    if (w * h >= pageArea * 0.6) continue;
++    // So is a full-width fill spanning a large share of the page height.
++    if (w >= pageWidth * 0.9 && h >= pageHeight * 0.2) continue;
 +    // Full-width bands are backgrounds / dividers, not drawing content.
 +    if (w > pageWidth * 0.85 && h < pageHeight * 0.12) continue;
 +    members.push(shape);
@@ -12169,7 +12265,13 @@ index 0000000..5169794
 +  pageWidth: number,
 +  pageHeight: number,
 +): LayoutResult {
-+  const result: LayoutResult = { tables: [], figures: [], flowRuns: runs, consumedSegments: 0 };
++  const result: LayoutResult = {
++    tables: [],
++    figures: [],
++    flowRuns: runs,
++    codeBoxes: [],
++    consumedSegments: 0,
++  };
 +  if (!graphics) return result;
 +  const upright = runs.filter((run) => !run.rotated);
 +  const bodySize = upright.length ? textSize(upright) : 10;
@@ -12182,6 +12284,14 @@ index 0000000..5169794
 +    else if (seg.x0 === seg.x1)
 +      vRules.push({ pos: seg.x0, a: Math.min(seg.y0, seg.y1), b: Math.max(seg.y0, seg.y1) });
 +  }
++  // A wide shaded box that is not the paper colour is a code listing or call-out.
++  const pageArea = pageWidth * pageHeight;
++  result.codeBoxes = [...graphics.fills, ...graphics.shapes].filter((box) => {
++    const w = box.x1 - box.x0;
++    const h = box.y1 - box.y0;
++    // The paper colour spans (almost) the full page width; code boxes keep margins.
++    return w >= pageWidth * 0.4 && w <= pageWidth * 0.92 && h >= bodySize * 2.5 && w * h < pageArea;
++  });
 +  const consumed = new Set<Run>();
 +  const grids = detectGrids(hRules, vRules, upright);
 +  grids.consumedRuns.forEach((run) => consumed.add(run));
@@ -12597,10 +12707,10 @@ index 21de8b3..d04b76f 100644
  const frameRect = (frame: Frame, rect?: Rect, sx = 1, sy = 1) => {
 diff --git a/docs/pdf-reflow.md b/docs/pdf-reflow.md
 new file mode 100644
-index 0000000..096f194
+index 0000000..10c8be4
 --- /dev/null
 +++ b/docs/pdf-reflow.md
-@@ -0,0 +1,91 @@
+@@ -0,0 +1,93 @@
 +# PDF 文字重排（单栏文字版）
 +
 +## 入口与使用
@@ -12625,6 +12735,8 @@ index 0000000..096f194
 +
 +适用：有正常文字层的单栏横排 PDF，正文和独立小字注释。
 +表格与图片：有格线表、仅有横线的三线表、无线的对齐表，以及"小号标签 + 大号数字、基线不对齐"的稀疏表（按行块分格，表题如“表 1 …”不并入表格）会重排为真正的表格；位图和密集矢量图（图表）按原页区域裁切后嵌入正文。识别不确定时保持普通文本流，不强行成表。
++
++误判防护：同一张位图盖印 4 次以上（平铺水印）、倾斜盖印的位图、整页纸底色填充均不视为图片；带灰底的代码框内的行不参与表格检测，并且逐行成块。
 +
 +不支持：OCR、复杂双栏结构还原、公式重建、AI 纠错或改写。
 +设置内说明适用局限，空页和旋转页明确回退原版。页眉/页脚仅保守去除孤立边缘数字页码，不笼统删除重复文字。
