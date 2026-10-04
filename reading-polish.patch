@@ -1137,10 +1137,10 @@ index f87ff3c..fc06662 100644
      const { container } = renderHeader();
 diff --git a/apps/readest-app/src/__tests__/components/PdfReflowDialog.test.tsx b/apps/readest-app/src/__tests__/components/PdfReflowDialog.test.tsx
 new file mode 100644
-index 0000000..5ecf2f4
+index 0000000..1f67527
 --- /dev/null
 +++ b/apps/readest-app/src/__tests__/components/PdfReflowDialog.test.tsx
-@@ -0,0 +1,511 @@
+@@ -0,0 +1,568 @@
 +import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 +import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 +import PdfReflowDialog from '@/app/reader/components/PdfReflowDialog';
@@ -1159,7 +1159,9 @@ index 0000000..5ecf2f4
 +  originalDoc: null as Document | null,
 +  notes: [] as import('@/types/book').BookNote[],
 +}));
-+vi.mock('@/context/EnvContext', () => ({ useEnv: () => ({ appService: { isMobile: true, isAndroidApp: true } }) }));
++vi.mock('@/context/EnvContext', () => ({
++  useEnv: () => ({ appService: { isMobile: true, isAndroidApp: true } }),
++}));
 +vi.mock('@/utils/bridge', () => ({ setSelectionSuppressed: mocks.suppressMenu }));
 +vi.mock('@/store/themeStore', () => ({
 +  useThemeStore: () => ({
@@ -1275,6 +1277,61 @@ index 0000000..5ecf2f4
 +      );
 +    } finally {
 +      eventDispatcher.off('footnote-selection', report);
++      window.getSelection()!.removeAllRanges();
++    }
++  });
++  it('withdraws the selection toolbar once the selection is cleared', async () => {
++    mocks.originalDoc = rangeFor('第一页正文。').startContainer.ownerDocument;
++    render(<PdfReflowDialog bookKey='pdf-1' onClose={vi.fn()} />);
++    const p = await screen.findByText('第一页正文。');
++    const range = document.createRange();
++    range.selectNodeContents(p);
++    window.getSelection()!.removeAllRanges();
++    window.getSelection()!.addRange(range);
++    const report = vi.fn();
++    eventDispatcher.on('footnote-selection', report);
++    try {
++      fireEvent(document, new Event('selectionchange'));
++      await waitFor(() => expect(report).toHaveBeenCalledTimes(1));
++      expect(report.mock.calls[0]![0].detail.range).toBeTruthy();
++      window.getSelection()!.removeAllRanges();
++      fireEvent(document, new Event('selectionchange'));
++      await waitFor(() => expect(report).toHaveBeenCalledTimes(2));
++      expect(report.mock.calls[1]![0].detail).toEqual({ key: 'pdf-1' });
++      // No further clears are reported for an already-empty selection.
++      fireEvent(document, new Event('selectionchange'));
++      await new Promise((r) => setTimeout(r, 250));
++      expect(report).toHaveBeenCalledTimes(2);
++    } finally {
++      eventDispatcher.off('footnote-selection', report);
++      window.getSelection()!.removeAllRanges();
++    }
++  });
++  it('a short tap away from the selected text deselects it and closes the toolbar', async () => {
++    mocks.originalDoc = rangeFor('第一页正文。').startContainer.ownerDocument;
++    render(<PdfReflowDialog bookKey='pdf-1' onClose={vi.fn()} />);
++    const p = await screen.findByText('第一页正文。');
++    const range = document.createRange();
++    range.selectNodeContents(p);
++    window.getSelection()!.removeAllRanges();
++    window.getSelection()!.addRange(range);
++    // jsdom has no layout: a selection rect far from the tap point.
++    range.getClientRects = () =>
++      [{ left: 0, right: 10, top: 0, bottom: 10, width: 10, height: 10 }] as unknown as DOMRectList;
++    vi.spyOn(window.getSelection()!, 'getRangeAt').mockReturnValue(range);
++    const report = vi.fn();
++    eventDispatcher.on('footnote-selection', report);
++    const article = p.closest('article')!;
++    try {
++      fireEvent.pointerDown(article, { clientX: 300, clientY: 300 });
++      fireEvent.pointerUp(article, { clientX: 300, clientY: 300 });
++      fireEvent.click(article, { clientX: 300, clientY: 300 });
++      expect(report).toHaveBeenCalledTimes(1);
++      expect(report.mock.calls[0]![0].detail).toEqual({ key: 'pdf-1' });
++      expect(window.getSelection()!.rangeCount).toBe(0);
++    } finally {
++      eventDispatcher.off('footnote-selection', report);
++      vi.restoreAllMocks();
 +      window.getSelection()!.removeAllRanges();
 +    }
 +  });
@@ -1891,6 +1948,79 @@ index 0000000..005a1cd
 +  await screen.findByText('ABCD');
 +  const signal = mocks.finish.mock.calls[0]![1]; unmount(); expect(signal.aborted).toBe(true);
 +});
+diff --git a/apps/readest-app/src/__tests__/components/command-palette-back.test.tsx b/apps/readest-app/src/__tests__/components/command-palette-back.test.tsx
+new file mode 100644
+index 0000000..716ab35
+--- /dev/null
++++ b/apps/readest-app/src/__tests__/components/command-palette-back.test.tsx
+@@ -0,0 +1,67 @@
++import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
++import { cleanup, render, screen } from '@testing-library/react';
++import { eventDispatcher } from '@/utils/event';
++import { useDeviceControlStore } from '@/store/deviceStore';
++
++const mocks = vi.hoisted(() => ({
++  close: vi.fn(),
++  isOpen: true,
++  android: true,
++  intercept: vi.fn(async () => {}),
++}));
++vi.mock('@/utils/bridge', () => ({
++  interceptKeys: mocks.intercept,
++  getScreenBrightness: vi.fn(),
++  setScreenBrightness: vi.fn(),
++}));
++vi.mock('@/hooks/useTranslation', () => ({ useTranslation: () => (s: string) => s }));
++vi.mock('@/context/EnvContext', () => ({
++  useEnv: () => ({ appService: { isAndroidApp: mocks.android } }),
++}));
++vi.mock('@/components/command-palette/CommandPaletteProvider', () => ({
++  useCommandPalette: () => ({
++    isOpen: mocks.isOpen,
++    close: mocks.close,
++    query: '',
++    setQuery: vi.fn(),
++    results: [],
++    groupedResults: { settings: [], actions: [], navigation: [] },
++    recentItems: [],
++    executeCommand: vi.fn(),
++  }),
++}));
++import CommandPalette from '@/components/command-palette/CommandPalette';
++
++beforeEach(() => {
++  vi.clearAllMocks();
++  mocks.isOpen = true;
++  mocks.android = true;
++  useDeviceControlStore.setState({ backKeyInterceptionCount: 0, backKeyIntercepted: false });
++});
++afterEach(cleanup);
++
++describe('command palette and Android Back', () => {
++  it('consumes a single native Back and closes the palette', () => {
++    render(<CommandPalette />);
++    expect(screen.getByRole('dialog')).toBeTruthy();
++    expect(useDeviceControlStore.getState().backKeyIntercepted).toBe(true);
++    const consumed = eventDispatcher.dispatchSync('native-key-down', { keyName: 'Back' });
++    expect(consumed).toBe(true);
++    expect(mocks.close).toHaveBeenCalledTimes(1);
++  });
++  it('ignores other native keys and releases the interception when closed', () => {
++    const { rerender } = render(<CommandPalette />);
++    expect(eventDispatcher.dispatchSync('native-key-down', { keyName: 'VolumeUp' })).toBe(false);
++    expect(mocks.close).not.toHaveBeenCalled();
++    mocks.isOpen = false;
++    rerender(<CommandPalette />);
++    expect(useDeviceControlStore.getState().backKeyIntercepted).toBe(false);
++    expect(eventDispatcher.dispatchSync('native-key-down', { keyName: 'Back' })).toBe(false);
++    expect(mocks.close).not.toHaveBeenCalled();
++  });
++  it('does not touch native key interception off Android', () => {
++    mocks.android = false;
++    render(<CommandPalette />);
++    expect(useDeviceControlStore.getState().backKeyIntercepted).toBe(false);
++  });
++});
 diff --git a/apps/readest-app/src/__tests__/components/page-jump-input.test.tsx b/apps/readest-app/src/__tests__/components/page-jump-input.test.tsx
 index 291f01a..a6afc5b 100644
 --- a/apps/readest-app/src/__tests__/components/page-jump-input.test.tsx
@@ -2331,41 +2461,78 @@ index 0000000..5e70c40
 +});
 diff --git a/apps/readest-app/src/__tests__/components/reading-ai-entry.test.tsx b/apps/readest-app/src/__tests__/components/reading-ai-entry.test.tsx
 new file mode 100644
-index 0000000..5858bc7
+index 0000000..3293ecd
 --- /dev/null
 +++ b/apps/readest-app/src/__tests__/components/reading-ai-entry.test.tsx
-@@ -0,0 +1,57 @@
+@@ -0,0 +1,163 @@
 +import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 +import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 +import { useState } from 'react';
 +vi.mock('@/hooks/useTranslation', () => ({ useTranslation: () => (key: string) => key }));
-+vi.mock('@/components/Menu', () => ({ default: ({ children }: { children: React.ReactNode }) => <div>{children}</div> }));
-+vi.mock('@/components/MenuItem', () => ({ default: ({ label, onClick }: { label: string; onClick: () => void }) => <button onClick={onClick}>{label}</button> }));
++vi.mock('@/components/Menu', () => ({
++  default: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
++}));
++vi.mock('@/components/MenuItem', () => ({
++  default: ({ label, onClick }: { label: string; onClick: () => void }) => (
++    <button onClick={onClick}>{label}</button>
++  ),
++}));
 +const dispatch = vi.hoisted(() => vi.fn());
 +vi.mock('@/utils/event', () => ({ eventDispatcher: { dispatch } }));
 +import QuickActionMenu from '@/app/reader/components/annotator/QuickActionMenu';
 +import { annotationToolQuickActions } from '@/app/reader/components/annotator/AnnotationTools';
 +import ReadingAIFloatingButton from '@/app/reader/components/ai/ReadingAIFloatingButton';
 +import type { AnnotationToolType } from '@/types/annotator';
-+class Observer { observe() {} disconnect() {} }
-+beforeEach(() => { vi.clearAllMocks(); vi.stubGlobal('ResizeObserver', Observer); });
-+afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
++class Observer {
++  observe() {}
++  disconnect() {}
++}
++beforeEach(() => {
++  vi.clearAllMocks();
++  vi.stubGlobal('ResizeObserver', Observer);
++});
++afterEach(() => {
++  cleanup();
++  vi.unstubAllGlobals();
++});
 +describe('reader AI discoverability', () => {
-+  it.each(['copy', 'highlight', 'translate', 'dictionary', 'tts'] as AnnotationToolType[])('explicitly disables %s without selecting another tool', action => {
-+    const onSelect = vi.fn(); const onClose = vi.fn();
-+    render(<QuickActionMenu selectedAction={action} onActionSelect={onSelect} setIsDropdownOpen={onClose} />);
++  it.each([
++    'copy',
++    'highlight',
++    'translate',
++    'dictionary',
++    'tts',
++  ] as AnnotationToolType[])('explicitly disables %s without selecting another tool', (action) => {
++    const onSelect = vi.fn();
++    const onClose = vi.fn();
++    render(
++      <QuickActionMenu
++        selectedAction={action}
++        onActionSelect={onSelect}
++        setIsDropdownOpen={onClose}
++      />,
++    );
 +    fireEvent.click(screen.getByText('关闭即时功能 · 恢复选区工具栏'));
-+    expect(onSelect).toHaveBeenCalledWith(null); expect(onClose).toHaveBeenCalledWith(false);
++    expect(onSelect).toHaveBeenCalledWith(null);
++    expect(onClose).toHaveBeenCalledWith(false);
 +  });
 +  it('same action toggles off then can be re-enabled', () => {
 +    function Harness() {
 +      const [action, setAction] = useState<AnnotationToolType | null>('copy');
-+      return <><output>{action || 'off'}</output><QuickActionMenu selectedAction={action} onActionSelect={next => setAction(next === action ? null : next)} /></>;
++      return (
++        <>
++          <output>{action || 'off'}</output>
++          <QuickActionMenu
++            selectedAction={action}
++            onActionSelect={(next) => setAction(next === action ? null : next)}
++          />
++        </>
++      );
 +    }
 +    render(<Harness />);
 +    const buttons = screen.getAllByText('Instant {{action}}', { selector: 'button' });
 +    // copy is identified by its quick-action tooltip order, not a duplicated translated label.
-+    const copyIndex = annotationToolQuickActions.findIndex(button => button.type === 'copy');
++    const copyIndex = annotationToolQuickActions.findIndex((button) => button.type === 'copy');
 +    fireEvent.click(buttons[copyIndex]!);
 +    expect(screen.getByText('off')).toBeTruthy();
 +    fireEvent.click(buttons[copyIndex]!);
@@ -2373,23 +2540,92 @@ index 0000000..5858bc7
 +  });
 +  it('places the floating button above visible footer and listening player', () => {
 +    const original = HTMLElement.prototype.getBoundingClientRect;
-+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function(this: HTMLElement) {
-+      const top = this.hasAttribute('data-view-transition-root') ? 0 : this.hasAttribute('data-reading-tts-player') ? 700 : 850;
-+      return { top, bottom: this.hasAttribute('data-view-transition-root') ? 915 : 915, height: 915 - top, width: 412, left: 0, right: 412, x: 0, y: top, toJSON: () => ({}) };
++    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (
++      this: HTMLElement,
++    ) {
++      const top = this.hasAttribute('data-view-transition-root')
++        ? 0
++        : this.hasAttribute('data-reading-tts-player')
++          ? 700
++          : 850;
++      return {
++        top,
++        bottom: this.hasAttribute('data-view-transition-root') ? 915 : 915,
++        height: 915 - top,
++        width: 412,
++        left: 0,
++        right: 412,
++        x: 0,
++        y: top,
++        toJSON: () => ({}),
++      };
 +    });
 +    try {
-+      render(<div data-view-transition-root=''><div className='footer-bar' data-visible='true' /><div data-reading-tts-player='visible' /><ReadingAIFloatingButton bookKey='book-test' /></div>);
++      render(
++        <div data-view-transition-root=''>
++          <div className='footer-bar' data-visible='true' />
++          <div data-reading-tts-player='visible' />
++          <ReadingAIFloatingButton bookKey='book-test' />
++        </div>,
++      );
 +      expect(screen.getByRole('button', { name: '问这本书' }).style.bottom).toBe('231px');
-+    } finally { HTMLElement.prototype.getBoundingClientRect = original; }
++    } finally {
++      HTMLElement.prototype.getBoundingClientRect = original;
++    }
++  });
++  it('stays above an open font/layout panel so More Settings is never covered', () => {
++    const original = HTMLElement.prototype.getBoundingClientRect;
++    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (
++      this: HTMLElement,
++    ) {
++      const top = this.hasAttribute('data-view-transition-root')
++        ? 0
++        : this.getAttribute('data-state') === 'open'
++          ? 520
++          : 850;
++      return {
++        top,
++        bottom: 915,
++        height: 915 - top,
++        width: 412,
++        left: 0,
++        right: 412,
++        x: 0,
++        y: top,
++        toJSON: () => ({}),
++      };
++    });
++    try {
++      render(
++        <div data-view-transition-root=''>
++          <div className='footer-bar' data-visible='true'>
++            <div data-state='open' />
++            <div data-state='closed' />
++          </div>
++          <ReadingAIFloatingButton bookKey='book-test' />
++        </div>,
++      );
++      expect(screen.getByRole('button', { name: '问这本书' }).style.bottom).toBe('411px');
++    } finally {
++      HTMLElement.prototype.getBoundingClientRect = original;
++    }
 +  });
 +  it('floating AI dispatches correct book and does not cause a page turn', () => {
 +    const turn = vi.fn();
-+    render(<div onClick={turn}><ReadingAIFloatingButton bookKey='book-test' bottomInset={16} /></div>);
++    render(
++      <div onClick={turn}>
++        <ReadingAIFloatingButton bookKey='book-test' bottomInset={16} />
++      </div>,
++    );
 +    const button = screen.getByRole('button', { name: '问这本书' });
 +    fireEvent.click(button);
 +    expect(turn).not.toHaveBeenCalled();
-+    expect(dispatch).toHaveBeenCalledWith('reading-ai-open', { bookKey: 'book-test', mode: 'book' });
-+    expect(button.className).toContain('absolute'); expect(button.style.bottom).toBe('40px');
++    expect(dispatch).toHaveBeenCalledWith('reading-ai-open', {
++      bookKey: 'book-test',
++      mode: 'book',
++    });
++    expect(button.className).toContain('absolute');
++    expect(button.style.bottom).toBe('40px');
 +  });
 +});
 diff --git a/apps/readest-app/src/__tests__/components/reading-assistant-host.test.tsx b/apps/readest-app/src/__tests__/components/reading-assistant-host.test.tsx
@@ -4401,10 +4637,10 @@ index 58f1135..e44cada 100644
                <SyncInfoDialog
 diff --git a/apps/readest-app/src/app/reader/components/PdfReflowDialog.tsx b/apps/readest-app/src/app/reader/components/PdfReflowDialog.tsx
 new file mode 100644
-index 0000000..64f34a1
+index 0000000..ccf8d74
 --- /dev/null
 +++ b/apps/readest-app/src/app/reader/components/PdfReflowDialog.tsx
-@@ -0,0 +1,656 @@
+@@ -0,0 +1,676 @@
 +import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 +import { useTTSPlayerHostStore } from '@/store/ttsPlayerHostStore';
 +import { useThemeStore } from '@/store/themeStore';
@@ -4714,20 +4950,22 @@ index 0000000..64f34a1
 +    const notifySelection = () => {
 +      const selected = window.getSelection();
 +      const article = scrollRef.current;
++      if (pointer.current?.down || !article || !result) return;
++      const visibleRange =
++        selected?.rangeCount && !selected.isCollapsed ? selected.getRangeAt(0) : null;
 +      if (
-+        pointer.current?.down ||
-+        !selected?.rangeCount ||
-+        selected.isCollapsed ||
-+        !article ||
-+        !result
-+      )
-+        return;
-+      const visibleRange = selected.getRangeAt(0);
-+      if (
++        !visibleRange ||
 +        !article.contains(visibleRange.startContainer) ||
 +        !article.contains(visibleRange.endContainer)
-+      )
++      ) {
++        // The selection is gone (tap elsewhere / cleared): withdraw the
++        // toolbar that was opened for it instead of leaving it stranded.
++        if (lastRange) {
++          lastRange = null;
++          void eventDispatcher.dispatch('footnote-selection', { key: bookKey });
++        }
 +        return;
++      }
 +      if (
 +        lastRange &&
 +        lastRange.startContainer === visibleRange.startContainer &&
@@ -4911,7 +5149,25 @@ index 0000000..64f34a1
 +            (e.target as HTMLElement).closest('button, input, select, a, [data-reflow-annotation]')
 +          )
 +            return;
-+          if (window.getSelection()?.toString()) return;
++          const selection = window.getSelection();
++          if (selection?.toString()) {
++            // A short tap away from the selected text deselects it and closes
++            // its toolbar; a tap on the selection itself leaves it alone.
++            if (p && !p.moved && Date.now() - p.time <= 450 && selection.rangeCount) {
++              const inside = Array.from(selection.getRangeAt(0).getClientRects()).some(
++                (r) =>
++                  e.clientX >= r.left - 8 &&
++                  e.clientX <= r.right + 8 &&
++                  e.clientY >= r.top - 8 &&
++                  e.clientY <= r.bottom + 8,
++              );
++              if (!inside) {
++                selection.removeAllRanges();
++                void eventDispatcher.dispatch('footnote-selection', { key: bookKey });
++              }
++            }
++            return;
++          }
 +          if (p && (p.moved || Date.now() - p.time > 450)) return;
 +          // Use the visible article's bounds, not the window: shared panels,
 +          // split views and landscape can change the reader's position/width.
@@ -5120,10 +5376,10 @@ index c6b8210..78417f3 100644
          <MenuItem
 diff --git a/apps/readest-app/src/app/reader/components/ai/ReadingAIFloatingButton.tsx b/apps/readest-app/src/app/reader/components/ai/ReadingAIFloatingButton.tsx
 new file mode 100644
-index 0000000..8b4437c
+index 0000000..c63052a
 --- /dev/null
 +++ b/apps/readest-app/src/app/reader/components/ai/ReadingAIFloatingButton.tsx
-@@ -0,0 +1,63 @@
+@@ -0,0 +1,67 @@
 +import { useLayoutEffect, useRef, useState } from 'react';
 +import { eventDispatcher } from '@/utils/event';
 +
@@ -5143,7 +5399,7 @@ index 0000000..8b4437c
 +      const frame = cell.getBoundingClientRect();
 +      let space = bottomInset + 24;
 +      for (const item of cell.querySelectorAll<HTMLElement>(
-+        '.footer-bar[data-visible="true"], [data-reading-tts-player="visible"]',
++        '.footer-bar[data-visible="true"], .footer-bar[data-visible="true"] [data-state="open"], [data-reading-tts-player="visible"]',
 +      )) {
 +        const rect = item.getBoundingClientRect();
 +        if (rect.height && rect.width) space = Math.max(space, frame.bottom - rect.top + 16);
@@ -5156,15 +5412,19 @@ index 0000000..8b4437c
 +      subtree: true,
 +      attributes: true,
 +      childList: true,
-+      attributeFilter: ['class', 'style', 'data-visible', 'data-reading-tts-player'],
++      attributeFilter: ['class', 'style', 'data-visible', 'data-state', 'data-reading-tts-player'],
 +    });
 +    size.observe(cell);
++    // The footer's font/color/progress panels are absolute children that extend
++    // above the 64px bar; transitions change their rect without a DOM change.
++    cell.addEventListener('transitionend', measure);
 +    window.addEventListener('resize', measure);
 +    measure();
 +    return () => {
 +      observer.disconnect();
 +      size.disconnect();
 +      window.removeEventListener('resize', measure);
++      cell.removeEventListener('transitionend', measure);
 +    };
 +  }, [bookKey, bottomInset]);
 +  return (
@@ -7415,6 +7675,56 @@ index c6666dc..d9e8b57 100644
          className,
        )}
        dir={isRtl ? 'rtl' : undefined}
+diff --git a/apps/readest-app/src/components/command-palette/CommandPalette.tsx b/apps/readest-app/src/components/command-palette/CommandPalette.tsx
+index da4ab72..687a3f3 100644
+--- a/apps/readest-app/src/components/command-palette/CommandPalette.tsx
++++ b/apps/readest-app/src/components/command-palette/CommandPalette.tsx
+@@ -8,12 +8,16 @@ import { useTranslation } from '@/hooks/useTranslation';
+ import { useCommandPalette } from './CommandPaletteProvider';
+ import { CommandSearchResult, getCategoryLabel, CommandCategory } from '@/services/commandRegistry';
+ import HighlightChars from './HighlightChars';
++import { useEnv } from '@/context/EnvContext';
++import { useDeviceControlStore } from '@/store/deviceStore';
++import { eventDispatcher } from '@/utils/event';
+ 
+ const CommandPalette: React.FC = () => {
+   const _ = useTranslation();
+   const { isOpen, close, query, setQuery, results, groupedResults, recentItems, executeCommand } =
+     useCommandPalette();
+ 
++  const { appService } = useEnv();
+   const inputRef = useRef<HTMLInputElement>(null);
+   const listRef = useRef<HTMLDivElement>(null);
+   const [selectedIndex, setSelectedIndex] = useState(0);
+@@ -56,6 +60,28 @@ const CommandPalette: React.FC = () => {
+     }
+   }, [isOpen]);
+ 
++  // Android Back: the palette is not a <Dialog>, so it has to claim the native
++  // back key itself. Otherwise the key falls through (nothing consumes it) and
++  // the palette stays open after the keyboard is dismissed.
++  const closeRef = useRef(close);
++  closeRef.current = close;
++  useEffect(() => {
++    if (!isOpen || !appService?.isAndroidApp) return;
++    const { acquireBackKeyInterception, releaseBackKeyInterception } =
++      useDeviceControlStore.getState();
++    const onNativeKey = (event: CustomEvent) => {
++      if (event.detail?.keyName !== 'Back') return false;
++      closeRef.current();
++      return true;
++    };
++    acquireBackKeyInterception();
++    eventDispatcher.onSync('native-key-down', onNativeKey);
++    return () => {
++      eventDispatcher.offSync('native-key-down', onNativeKey);
++      releaseBackKeyInterception();
++    };
++  }, [isOpen, appService?.isAndroidApp]);
++
+   // scroll selected item into view
+   useEffect(() => {
+     if (!listRef.current) return;
 diff --git a/apps/readest-app/src/components/settings/AIPanel.tsx b/apps/readest-app/src/components/settings/AIPanel.tsx
 index f7ccf1b..24e5c35 100644
 --- a/apps/readest-app/src/components/settings/AIPanel.tsx
