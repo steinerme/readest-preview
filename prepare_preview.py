@@ -91,6 +91,16 @@ for activity in application.findall('activity'):
         schemes = [x.get(f'{{{ns}}}scheme') for x in intent.findall('data')]
         if any(s and s not in ('file', 'content') for s in schemes):
             activity.remove(intent)
+# Preview-only test hook: readest-preview-debug://select?... creates a text
+# selection (device tests cannot long-press). Not exported to browsers: no
+# BROWSABLE category, so only an explicit intent (adb / am start) reaches it.
+main = [a for a in application.findall('activity')
+        if a.get(f'{{{ns}}}name', '').endswith('MainActivity')]
+assert len(main) == 1, main
+debug = ET.SubElement(main[0], 'intent-filter')
+ET.SubElement(debug, 'action', {f'{{{ns}}}name': 'android.intent.action.VIEW'})
+ET.SubElement(debug, 'category', {f'{{{ns}}}name': 'android.intent.category.DEFAULT'})
+ET.SubElement(debug, 'data', {f'{{{ns}}}scheme': 'readest-preview-debug'})
 tree.write(manifest, encoding='utf-8', xml_declaration=True)
 
 config = root / 'src-tauri/tauri.conf.json'

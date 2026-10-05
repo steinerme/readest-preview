@@ -1,41 +1,126 @@
 name: Build Readest Preview APK
 on:
   workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Commit, tag or branch of steinerme/readest to build
+        required: true
+        default: preview
 permissions:
   contents: read
 concurrency:
   group: android-preview
   cancel-in-progress: false
+env:
+  SOURCE_REPO: steinerme/readest
+  NEXT_TELEMETRY_DISABLED: '1'
 jobs:
+  # Fast gate (~3-4 min): type check, the reading/reflow regression tests and
+  # the reflow golden pages. The APK job only starts when this passes, so a
+  # broken change fails in minutes instead of after a 20 minute build.
+  checks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    outputs:
+      sha: ${{ steps.src.outputs.sha }}
+    env:
+      NODE_OPTIONS: --max-old-space-size=6144
+    steps:
+      - uses: actions/checkout@v4
+      - name: Checkout preview source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SOURCE_REPO }}
+          ref: ${{ inputs.source_ref }}
+          path: source
+          persist-credentials: false
+      - id: src
+        working-directory: source
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Load build submodules and the PDF text bridge
+        working-directory: source
+        run: |
+          git submodule update --init --recursive packages/foliate-js packages/simplecc-wasm packages/js-mdict
+          git -C packages/foliate-js apply --check ../../../foliate-reflow.patch
+          git -C packages/foliate-js apply ../../../foliate-reflow.patch
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.1.1
+          run_install: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: pnpm
+          cache-dependency-path: source/pnpm-lock.yaml
+      - name: Install locked dependencies and reading assets
+        working-directory: source
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm --filter @readest/readest-app setup-vendors
+      - name: Type check
+        working-directory: source
+        run: node node_modules/typescript/lib/tsc.js --noEmit -p apps/readest-app/tsconfig.json
+      - name: Reading, reflow and AI regression tests
+        working-directory: source/apps/readest-app
+        run: >-
+          pnpm test --run --maxWorkers=3
+          src/__tests__/ai/
+          src/__tests__/utils/pdfReflow*.test.ts
+          src/__tests__/utils/pdfRendererPage.test.ts
+          src/__tests__/utils/debugSelection.test.ts
+          src/__tests__/foliate-pdf-reflow.test.ts
+          src/__tests__/document/pdf-tts.test.ts
+          src/__tests__/document/pdf-reflow-speech.test.ts
+          src/__tests__/services/tts-controller*.test.ts
+          src/__tests__/services/tts-word-highlight.test.ts
+          src/__tests__/services/tts-inline-annotations.test.ts
+          src/__tests__/hooks/usePdfReflowTTS.test.tsx
+          src/__tests__/hooks/useTTSControl.test.tsx
+          src/__tests__/hooks/useReflowSelectionMenu.test.tsx
+          src/__tests__/hooks/useAppUrlIngress-debug.test.ts
+          src/__tests__/components/pdf-default-reflow.test.tsx
+          src/__tests__/components/HeaderBar.test.tsx
+          src/__tests__/components/PdfReflowDialog.test.tsx
+          src/__tests__/components/tts/
+          src/__tests__/components/pdf-shared-footer.test.tsx
+          src/__tests__/components/pdf-reflow-bookmark.test.tsx
+          src/__tests__/components/page-jump-input.test.tsx
+          src/__tests__/components/font-layout-panel.test.tsx
+          src/__tests__/components/annotator/AnnotatorLookupSurfaces.test.tsx
+          src/__tests__/app/reader/hooks/usePagination-mediaTap.test.ts
+          src/__tests__/components/reading-assistant-panel.test.tsx
+          src/__tests__/components/reading-assistant-host.test.tsx
+          src/__tests__/components/reading-ai-entry.test.tsx
+          src/__tests__/components/reading-floating-dock.test.tsx
+          src/__tests__/components/tts-mini-player-position.test.ts
+          src/__tests__/components/settings-overscroll.test.tsx
+          src/__tests__/components/codex-oauth-settings.test.tsx
+          src/__tests__/components/command-palette-back.test.tsx
+          src/__tests__/helpers/settings.test.ts
+
   build:
+    needs: checks
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     env:
-      NEXT_TELEMETRY_DISABLED: '1'
       CARGO_BUILD_JOBS: '2'
-      # Standard public ubuntu runner: allow the large Next/Webpack graph
-      # more than the previous 4 GiB heap without selecting a paid runner.
       NODE_OPTIONS: --max-old-space-size=10240
+      NEXT_PUBLIC_PREVIEW_DEBUG_LINKS: '1'
     steps:
       - uses: actions/checkout@v4
-      - name: Checkout exact upstream source
+      - name: Checkout the exact commit that passed checks
         uses: actions/checkout@v4
         with:
-          repository: readest/readest
-          ref: 6e567ef3106a9bf6e6daa697760db66cc30b4b8a
+          repository: ${{ env.SOURCE_REPO }}
+          ref: ${{ needs.checks.outputs.sha }}
           path: source
           persist-credentials: false
-      - name: Apply reviewed UI patch and load build submodules
+      - name: Load build submodules and the PDF text bridge
         working-directory: source
         run: |
-          git apply --check ../reading-polish.patch
-          git apply ../reading-polish.patch
           git submodule update --init --recursive packages/foliate-js packages/tauri packages/simplecc-wasm packages/qcms packages/js-mdict apps/readest-app/src-tauri/plugins/tauri-plugin-turso apps/readest-app/src-tauri/plugins/tauri-plugin-webview-upgrade
-      - name: Apply PDF text extraction bridge patch
-        working-directory: source/packages/foliate-js
-        run: |
-          git apply --check ../../../foliate-reflow.patch
-          git apply ../../../foliate-reflow.patch
+          git -C packages/foliate-js apply --check ../../../foliate-reflow.patch
+          git -C packages/foliate-js apply ../../../foliate-reflow.patch
       - uses: pnpm/action-setup@v4
         with:
           version: 11.1.1
@@ -49,6 +134,11 @@ jobs:
         with:
           distribution: zulu
           java-version: '17'
+      # Gradle distribution + dependency + build caches (Gradle step was ~4 min
+      # including a fresh distribution download every run).
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-read-only: false
       - uses: android-actions/setup-android@v3
         with:
           packages: platform-tools
@@ -63,16 +153,20 @@ jobs:
         with:
           workspaces: source -> target
           key: android-preview-arm64
+      # Next/webpack persistent cache (the web build was a cold 3 min every run:
+      # "No build cache found").
+      - name: Restore Next.js build cache
+        uses: actions/cache@v4
+        with:
+          path: source/apps/readest-app/.next/cache
+          key: next-${{ hashFiles('source/pnpm-lock.yaml') }}-${{ needs.checks.outputs.sha }}
+          restore-keys: |
+            next-${{ hashFiles('source/pnpm-lock.yaml') }}-
       - name: Install locked dependencies and reading assets
         working-directory: source
         run: |
           pnpm install --frozen-lockfile
           pnpm --filter @readest/readest-app setup-vendors
-      - name: Verify PDF default reflow and listening regressions
-        working-directory: source
-        run: |
-          node node_modules/typescript/lib/tsc.js --noEmit -p apps/readest-app/tsconfig.json
-          pnpm --filter @readest/readest-app test --run --maxWorkers=2 src/__tests__/components/pdf-default-reflow.test.tsx src/__tests__/components/HeaderBar.test.tsx src/__tests__/components/PdfReflowDialog.test.tsx src/__tests__/utils/pdfReflow.test.ts src/__tests__/utils/pdfRendererPage.test.ts src/__tests__/foliate-pdf-reflow.test.ts src/__tests__/hooks/usePdfReflowTTS.test.tsx src/__tests__/utils/pdfReflowTTS.test.ts src/__tests__/document/pdf-tts.test.ts src/__tests__/document/pdf-reflow-speech.test.ts src/__tests__/services/tts-controller.test.ts src/__tests__/services/tts-controller-lifecycle.test.ts src/__tests__/services/tts-controller-detach.test.ts src/__tests__/services/tts-word-highlight.test.ts src/__tests__/hooks/useTTSControl.test.tsx src/__tests__/services/tts-inline-annotations.test.ts src/__tests__/components/tts/TTSControl.test.tsx src/__tests__/components/tts/TTSMiniPlayer.test.tsx src/__tests__/components/tts/TTSPlayerSheet.test.tsx src/__tests__/components/tts/TTSScrubber.test.tsx src/__tests__/components/tts/SpeedRuler.test.tsx src/__tests__/components/pdf-shared-footer.test.tsx src/__tests__/components/pdf-reflow-bookmark.test.tsx src/__tests__/components/page-jump-input.test.tsx src/__tests__/components/font-layout-panel.test.tsx src/__tests__/utils/pdfReflowSelection.test.ts src/__tests__/components/annotator/AnnotatorLookupSurfaces.test.tsx src/__tests__/app/reader/hooks/usePagination-mediaTap.test.ts src/__tests__/ai/reading-context.test.ts src/__tests__/ai/reading-assistant.test.ts src/__tests__/ai/reading-speech.test.ts src/__tests__/ai/reading-transport.test.ts src/__tests__/components/reading-assistant-panel.test.tsx src/__tests__/components/reading-assistant-host.test.tsx src/__tests__/components/tts-mini-player-position.test.ts src/__tests__/ai/providers.test.ts src/__tests__/components/settings-overscroll.test.tsx src/__tests__/ai/codex-auth.test.ts src/__tests__/ai/codex-provider.test.ts src/__tests__/components/reading-ai-entry.test.tsx src/__tests__/components/reading-floating-dock.test.tsx src/__tests__/ai/reading-recall.test.ts src/__tests__/ai/reading-navigation.test.ts src/__tests__/components/codex-oauth-settings.test.tsx src/__tests__/helpers/settings.test.ts src/__tests__/hooks/useReflowSelectionMenu.test.tsx src/__tests__/components/command-palette-back.test.tsx src/__tests__/utils/pdfReflowLayout.test.ts src/__tests__/utils/pdfReflowReal.test.ts
       - name: Load private custom branding
         env:
           PREVIEW_BRANDING_PASSWORD: ${{ secrets.PREVIEW_BRANDING_PASSWORD }}
@@ -137,6 +231,9 @@ jobs:
           java -jar "$RUNNER_TEMP/apktool.jar" d -f -s artifacts/Readest-Preview-arm64.apk -o "$RUNNER_TEMP/final-apk"
           python3 verify_apk_branding.py "$RUNNER_TEMP/final-apk" > artifacts/branding-verification.txt
           cat artifacts/branding-verification.txt
+          # The preview-only debug link must be registered (explicit intents only).
+          grep -q 'android:scheme="readest-preview-debug"' "$RUNNER_TEMP/final-apk/AndroidManifest.xml"
+          echo "source ${{ env.SOURCE_REPO }}@${{ needs.checks.outputs.sha }}" > artifacts/SOURCE.txt
           cd artifacts && sha256sum Readest-Preview-arm64.apk > SHA256SUMS.txt
       - uses: actions/upload-artifact@v4
         with:

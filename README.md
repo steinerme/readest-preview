@@ -4,12 +4,17 @@ Personal Android UI preview of [Readest](https://github.com/readest/readest), no
 
 ## Reproducible source
 
-- Upstream commit: `6e567ef3106a9bf6e6daa697760db66cc30b4b8a` (Readest 0.12.10).
-- `reading-polish.patch` contains every UI modification, tests, and detailed validation notes.
+- Source lives in the fork **[steinerme/readest](https://github.com/steinerme/readest)**, branch `preview`, on top of upstream `6e567ef3106a9bf6e6daa697760db66cc30b4b8a` (Readest 0.12.10).
+  Every preview version is a commit with a tag (`v20006` … `v20020`, then `v20021`+), so `git diff v20019 v20020` is exactly what a version changed. Rebase `preview` onto newer upstream instead of growing a patch.
 - `foliate-reflow.patch` adds a read-only PDF text extraction API to the pinned foliate-js submodule; the workflow applies it after initializing submodules.
-- `prepare_preview.py` contains all Android packaging changes.
-- The workflow checks out that exact commit, applies the patch and builds an ARM64 APK.
+- `prepare_preview.py` contains all Android packaging changes (separate app id, icons, preview-only debug link).
+- The workflow takes a `source_ref` input (default `preview`), resolves it to one commit, runs a fast check job (type check + reading/reflow/AI tests + reflow golden pages, a few minutes), and only then builds the ARM64 APK from that same commit. `SOURCE.txt` in the artifact names the commit.
+- `reading-polish.patch` is the frozen 20020 patch, kept only for reference; it is no longer used by the build.
 - Source and modifications remain under AGPL-3.0; see LICENSE and upstream notices.
+
+## Device test hook (preview only)
+
+Preview builds accept `readest-preview-debug://select?text=<words>[&occurrence=N]` (or `?block=<i>&start=<a>&end=<b>` in reflow) to place a real text selection, because UI automation cannot long-press. It is registered without `BROWSABLE`, so only explicit intents reach it (e.g. `am start -a android.intent.action.VIEW -d '…' com.bilingify.readest.preview`). It saves and sends nothing.
 
 ## Install isolation
 
