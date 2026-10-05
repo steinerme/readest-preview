@@ -40,7 +40,8 @@ jobs:
       - name: Load build submodules and the PDF text bridge
         working-directory: source
         run: |
-          git submodule update --init --recursive packages/foliate-js packages/simplecc-wasm packages/js-mdict
+          # tauri-plugin-turso supplies TypeScript types the app imports.
+          git submodule update --init --recursive packages/foliate-js packages/simplecc-wasm packages/js-mdict apps/readest-app/src-tauri/plugins/tauri-plugin-turso
           git -C packages/foliate-js apply --check ../../../foliate-reflow.patch
           git -C packages/foliate-js apply ../../../foliate-reflow.patch
       - uses: pnpm/action-setup@v4
