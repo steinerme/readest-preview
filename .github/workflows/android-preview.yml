@@ -67,6 +67,7 @@ jobs:
           pnpm test --run --maxWorkers=3
           src/__tests__/ai/
           src/__tests__/utils/pdfReflow*.test.ts
+          src/__tests__/styles/pdf-reflow-inline-equation.test.ts
           src/__tests__/utils/pdfRendererPage.test.ts
           src/__tests__/utils/debugSelection.test.ts
           src/__tests__/foliate-pdf-reflow.test.ts
