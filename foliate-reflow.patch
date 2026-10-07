@@ -1,8 +1,8 @@
 diff --git a/pdf.js b/pdf.js
-index c389f98..5ed300f 100644
+index c389f98..c6b357a 100644
 --- a/pdf.js
 +++ b/pdf.js
-@@ -717,6 +717,75 @@ export const makePDF = async file => {
+@@ -717,6 +717,91 @@ export const makePDF = async file => {
      }
      book.sections = Array.from({ length: pdf.numPages }).map((_, i) => ({
          id: i,
@@ -20,6 +20,7 @@ index c389f98..5ed300f 100644
 +                    transform: [...item.transform.slice(0, 4), item.transform[4] - x1, item.transform[5] - y1],
 +                    hasEOL: item.hasEOL,
 +                    dir: item.dir,
++                    fontName: item.fontName,
 +                })),
 +                width: x2 - x1,
 +                height: y2 - y1,
@@ -32,7 +33,22 @@ index c389f98..5ed300f 100644
 +            const page = await getPage(i)
 +            const list = await page.getOperatorList()
 +            const [x1, y1, x2, y2] = page.view
++            // Real font names (e.g. CMUTypewriter, CMMI10) let the reflow tell
++            // code and math from prose. Fonts are loaded by the operator list.
++            const fonts = {}
++            for (let k = 0; k < list.fnArray.length; k++) {
++                if (list.fnArray[k] !== pdfjsLib.OPS.setFont) continue
++                const id = list.argsArray[k]?.[0]
++                if (typeof id !== 'string' || id in fonts) continue
++                try {
++                    const font = page.commonObjs.get(id)
++                    fonts[id] = String(font?.name ?? '').replace(/^[A-Z]{6}\+/, '')
++                } catch {
++                    fonts[id] = ''
++                }
++            }
 +            return {
++                fonts,
 +                fnArray: list.fnArray,
 +                argsArray: list.argsArray,
 +                ops: { ...pdfjsLib.OPS },

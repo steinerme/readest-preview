@@ -61,6 +61,17 @@ jobs:
       - name: Type check
         working-directory: source
         run: node node_modules/typescript/lib/tsc.js --noEmit -p apps/readest-app/tsconfig.json
+      - name: Decrypt the real-PDF reflow test set
+        env:
+          REFLOW_CORPUS_KEY: ${{ secrets.REFLOW_CORPUS_KEY }}
+        run: |
+          # 34 real pages kept encrypted in this public repository. The
+          # preview build must pass them, so a missing key fails the build.
+          test -n "$REFLOW_CORPUS_KEY" && test -f reflow-corpus.enc
+          openssl enc -d -aes-256-cbc -pbkdf2 -iter 100000 -in reflow-corpus.enc \
+            -out "$RUNNER_TEMP/reflow-corpus.pdf" -pass env:REFLOW_CORPUS_KEY
+          echo "5edab0f13437b5acdea4cbfa89b1499ce10b303a59b0d55ede343b21375d9c73  $RUNNER_TEMP/reflow-corpus.pdf" | sha256sum -c
+          echo "REFLOW_CORPUS_PDF=$RUNNER_TEMP/reflow-corpus.pdf" >> "$GITHUB_ENV"
       - name: Reading, reflow and AI regression tests
         working-directory: source/apps/readest-app
         run: >-
