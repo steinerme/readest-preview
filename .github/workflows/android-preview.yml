@@ -90,10 +90,12 @@ jobs:
           src/__tests__/hooks/usePdfReflowTTS.test.tsx
           src/__tests__/hooks/useTTSControl.test.tsx
           src/__tests__/hooks/useReflowSelectionMenu.test.tsx
+          src/__tests__/hooks/useReflowOverflowHints.test.tsx
           src/__tests__/hooks/useAppUrlIngress-debug.test.ts
           src/__tests__/components/pdf-default-reflow.test.tsx
           src/__tests__/components/HeaderBar.test.tsx
           src/__tests__/components/PdfReflowDialog.test.tsx
+          src/__tests__/components/PdfReflowFigure.test.tsx
           src/__tests__/components/tts/
           src/__tests__/components/pdf-shared-footer.test.tsx
           src/__tests__/components/pdf-reflow-bookmark.test.tsx
